@@ -90,12 +90,21 @@ FILTER_TARGETS = (
 )
 
 
-def read(path: pathlib.Path) -> str:
-    return path.read_text(encoding="utf-8")
+def read(path: pathlib.Path):
+    """Return (text normalised to LF, the file's own newline style)."""
+    # newline="" keeps the bytes as authored. pathlib grew that argument
+    # only in 3.13 and ComfyUI still ships 3.10, so use open() directly.
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        raw = handle.read()
+    crlf, lf = chr(13) + chr(10), chr(10)
+    return raw.replace(crlf, lf), (crlf if crlf in raw else lf)
 
 
-def write(path: pathlib.Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8", newline="\n")
+def write(path: pathlib.Path, text: str, newline: str) -> None:
+    # Write back in the file's original newline style, so the diff stays
+    # confined to the lines that actually changed.
+    with open(path, "w", encoding="utf-8", newline=newline) as handle:
+        handle.write(text)
     # Drop any stale bytecode so the next ComfyUI start cannot reuse it.
     cache = path.parent / "__pycache__"
     if cache.is_dir():
@@ -123,7 +132,7 @@ def process(path: pathlib.Path, is_fixed, transform, check: bool) -> str:
         print(f"  SKIP    {path.name}: not present")
         return "skipped"
 
-    text = read(path)
+    text, newline = read(path)
     if is_fixed(text):
         print(f"  OK      {path.name}: already patched")
         return "already"
@@ -140,7 +149,7 @@ def process(path: pathlib.Path, is_fixed, transform, check: bool) -> str:
     backup = path.with_suffix(path.suffix + ".orig")
     if not backup.exists():
         shutil.copy2(path, backup)
-    write(path, updated)
+    write(path, updated, newline)
     print(f"  PATCHED {path.name}: {count} site(s) (backup: {backup.name})")
     return "patched"
 
@@ -154,13 +163,23 @@ def main() -> int:
         help="Repository root holding ComfyUI/ (default: this file's parent repo).",
     )
     parser.add_argument(
+        "--node-root",
+        type=pathlib.Path,
+        default=None,
+        help="Patch this tts_audio_suite checkout directly, ignoring --project-root.",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Report status without writing; exit 1 if the fix is not applied.",
     )
     args = parser.parse_args()
 
-    node_root = args.project_root.joinpath(*NODE_RELATIVE_PATH.parts)
+    node_root = (
+        args.node_root
+        if args.node_root is not None
+        else args.project_root.joinpath(*NODE_RELATIVE_PATH.parts)
+    )
     if not node_root.is_dir():
         print(f"tts_audio_suite is not installed at {node_root} - nothing to do.")
         return 0

@@ -27,5 +27,12 @@ python patches\tts_audio_suite_s3gen_token_bounds.py           # apply
 python patches\tts_audio_suite_s3gen_token_bounds.py --check   # report only, exit 1 if unpatched
 ```
 
-Re-runnable, writes `.orig` backups, and leaves already-fixed files alone (the
-node's `chatterbox_official_23lang` engine ships part of this fix upstream).
+Re-runnable, writes `.orig` backups, preserves each file's line endings, and
+leaves already-fixed files alone (the node's `chatterbox_official_23lang` engine
+ships part of this fix upstream). Pass `--node-root <path>` to patch a
+tts_audio_suite checkout somewhere other than `ComfyUI/custom_nodes/`.
+
+Submitted upstream as [diodiogod/TTS-Audio-Suite#368][pr]; drop this patch once
+it lands in a release we install.
+
+[pr]: https://github.com/diodiogod/TTS-Audio-Suite/pull/368
