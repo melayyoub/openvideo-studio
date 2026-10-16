@@ -90,7 +90,7 @@ print()
 print("selector — default weights, reference connected")
 frame, idx, score, report = sel.select(clip, 12, 1.0, 1.0, 0.6, 2.0,
                                        reference=ref[None])
-print("\n".join("    " + l for l in report.splitlines()))
+print("\n".join("    " + line for line in report.splitlines()))
 ok &= check("did NOT pick the literal last frame (19)", idx != 19)
 ok &= check("did NOT pick the flared frame (18)", idx != 18)
 ok &= check("picked from the clean tail region (<=13)", idx <= 13)

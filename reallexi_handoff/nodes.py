@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .scoring import (_gray, _hist_match, _meanstd_match, exposure_penalty,
-                      score_window, sharpness, similarity)
+                      score_window, similarity)
 
 try:
     import torch
