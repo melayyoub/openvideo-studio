@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,42 @@ class BackendArgumentTests(unittest.TestCase):
             backend_arguments(["--enable-manager"], rocm=False),
             ["--enable-manager"],
         )
+
+    def test_pinned_memory_is_disabled_on_low_memory_hosts(self) -> None:
+        self.assertEqual(
+            backend_arguments([], rocm=False, low_memory=True),
+            ["--disable-pinned-memory", "--enable-manager"],
+        )
+        self.assertEqual(backend_arguments([], rocm=False), ["--enable-manager"])
+
+    def test_an_explicit_pinned_memory_flag_is_not_duplicated(self) -> None:
+        self.assertEqual(
+            backend_arguments(["--disable-pinned-memory"], rocm=False, low_memory=True),
+            ["--enable-manager", "--disable-pinned-memory"],
+        )
+
+    def test_pinned_memory_risk_follows_installed_ram(self) -> None:
+        gib = 1024**3
+        small = {"total_ram": 32 * gib, "available_ram": 8 * gib,
+                 "commit_limit": 96 * gib, "available_commit": 64 * gib}
+        large = dict(small, total_ram=64 * gib)
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OVS_PINNED_MEMORY", None)
+            os.environ.pop("CUSTOM_WAN_PINNED_MEMORY", None)
+            self.assertTrue(wan2_cli.pinned_memory_is_risky(small))
+            self.assertFalse(wan2_cli.pinned_memory_is_risky(large))
+            self.assertFalse(wan2_cli.pinned_memory_is_risky(None))
+            os.environ["OVS_PINNED_MEMORY"] = "1"
+            self.assertFalse(wan2_cli.pinned_memory_is_risky(small))
+
+    def test_memory_warnings_flag_low_commit_and_ram(self) -> None:
+        gib = 1024**3
+        healthy = {"total_ram": 32 * gib, "available_ram": 8 * gib,
+                   "commit_limit": 128 * gib, "available_commit": 64 * gib}
+        self.assertEqual(wan2_cli.memory_warnings(healthy), [])
+        self.assertEqual(wan2_cli.memory_warnings(None), [])
+        starved = dict(healthy, available_ram=gib // 2, available_commit=20 * gib)
+        self.assertEqual(len(wan2_cli.memory_warnings(starved)), 2)
 
     def test_cuda_malloc_is_disabled_on_blackwell(self) -> None:
         self.assertEqual(

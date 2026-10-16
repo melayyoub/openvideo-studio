@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import importlib
 import os
@@ -63,6 +64,77 @@ def cuda_is_blackwell() -> bool:
         return torch.cuda.get_device_capability(0)[0] >= 10
     except Exception:
         return False
+
+
+class _MemoryStatusEx(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def windows_memory_status() -> dict[str, int] | None:
+    """Physical RAM and commit (RAM + page file) totals on Windows, else None."""
+    if os.name != "nt":
+        return None
+    status = _MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+    except Exception:
+        return None
+    return {
+        "total_ram": status.ullTotalPhys,
+        "available_ram": status.ullAvailPhys,
+        "commit_limit": status.ullTotalPageFile,
+        "available_commit": status.ullAvailPageFile,
+    }
+
+
+# Below this much RAM, Windows hosts start ComfyUI without pinned memory.
+# ComfyUI page-locks up to 40% of RAM on Windows for faster offload. Locked
+# pages can never be swapped out, so on a 32 GB machine running a large image
+# model next to an isolated custom-node worker (TRELLIS2) the system ran out of
+# lockable memory: allocations of a few MB failed ("DefaultCPUAllocator: not
+# enough memory", WinError 1450) and the process or its worker died without a
+# Python traceback. Unpinned offload is slower but pageable, so it survives.
+LOW_MEMORY_HOST_BYTES = 48 * 1024**3
+LOW_COMMIT_WARNING_BYTES = 32 * 1024**3
+LOW_RAM_WARNING_BYTES = 4 * 1024**3
+
+
+def pinned_memory_is_risky(status: dict[str, int] | None) -> bool:
+    if status is None or env_setting("PINNED_MEMORY").strip() == "1":
+        return False
+    return status["total_ram"] < LOW_MEMORY_HOST_BYTES
+
+
+def memory_warnings(status: dict[str, int] | None) -> list[str]:
+    if status is None:
+        return []
+    gib = 1024**3
+    warnings = []
+    if status["available_commit"] < LOW_COMMIT_WARNING_BYTES:
+        warnings.append(
+            f"only {status['available_commit'] / gib:.1f} GB of "
+            f"{status['commit_limit'] / gib:.1f} GB commit (RAM + page file) is "
+            "free. Large video and image models can crash ComfyUI without a "
+            "traceback; close other heavy programs or enlarge the page file."
+        )
+    if status["available_ram"] < LOW_RAM_WARNING_BYTES:
+        warnings.append(
+            f"only {status['available_ram'] / gib:.1f} GB of "
+            f"{status['total_ram'] / gib:.1f} GB RAM is free."
+        )
+    return warnings
 
 
 PIP_NETWORK_OPTIONS = ["--retries", "10", "--timeout", "120"]
@@ -186,6 +258,8 @@ MANAGER_ARGUMENTS = frozenset({"--enable-manager", "--enable-manager-legacy-ui"}
 
 # An explicit choice either way in COMFYUI_ARGS wins over the Blackwell default.
 CUDA_MALLOC_ARGUMENTS = frozenset({"--cuda-malloc", "--disable-cuda-malloc"})
+# An explicit choice in COMFYUI_ARGS wins over the low-memory default.
+PINNED_MEMORY_ARGUMENTS = frozenset({"--disable-pinned-memory"})
 
 
 def torch_stack_constraints(python_path: Path, venv_dir: Path) -> Path | None:
@@ -533,7 +607,12 @@ def ensure_backend_venv(backend: str, comfyui_dir: Path) -> Path:
     return python_path
 
 
-def backend_arguments(extra_args: list[str], rocm: bool, blackwell: bool = False) -> list[str]:
+def backend_arguments(
+    extra_args: list[str],
+    rocm: bool,
+    blackwell: bool = False,
+    low_memory: bool = False,
+) -> list[str]:
     """Merge COMFYUI_ARGS with the arguments a backend contributes.
 
     Backend defaults are added alongside COMFYUI_ARGS rather than instead of
@@ -551,6 +630,9 @@ def backend_arguments(extra_args: list[str], rocm: bool, blackwell: bool = False
         # RTX 30/40-series don't hit this and would just lose the allocator's
         # real performance benefit for nothing.
         arguments.append("--disable-cuda-malloc")
+    if low_memory and not PINNED_MEMORY_ARGUMENTS.intersection(extra_args):
+        # See LOW_MEMORY_HOST_BYTES.
+        arguments.append("--disable-pinned-memory")
     if not MANAGER_ARGUMENTS.intersection(extra_args):
         arguments.append("--enable-manager")
     arguments.extend(extra_args)
@@ -615,7 +697,6 @@ def main() -> None:
     launch_python = Path(sys.executable)
     device_arguments: list[str] = []
     using_directml = False
-    using_cuda = False
     if args.device == "directml":
         if not directml_ready:
             launch_python = ensure_backend_venv("directml", comfyui_dir)
@@ -634,7 +715,6 @@ def main() -> None:
                     "matching build and delete that environment to provision it "
                     "again."
                 )
-        using_cuda = True
     elif args.device == "rocm":
         if not rocm_ready:
             launch_python = ensure_backend_venv("rocm", comfyui_dir)
@@ -651,8 +731,8 @@ def main() -> None:
             rocm_ready = True
     elif args.device == "cpu":
         device_arguments = ["--cpu"]
-    elif gpu_ready:  # auto
-        using_cuda = True
+    elif gpu_ready:  # auto: CUDA needs no device arguments
+        pass
     elif directml_ready:
         using_directml = True
         device_arguments = ["--directml", str(pick_directml_device(launch_python))]
@@ -683,6 +763,16 @@ def main() -> None:
         # video workloads. An explicit setting in the environment still wins.
         os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
 
+    memory_status = windows_memory_status()
+    for warning in memory_warnings(memory_status):
+        print(f"[wan2_cli] Warning: {warning}")
+    low_memory = pinned_memory_is_risky(memory_status)
+    if low_memory:
+        print(
+            "[wan2_cli] Pinned memory is off on this host (under 48 GB RAM); "
+            "set OVS_PINNED_MEMORY=1 to keep it."
+        )
+
     command = [str(launch_python), str(main_py), "--port", str(args.port)]
     if args.listen_all:
         command.extend(["--listen", "0.0.0.0"])
@@ -691,7 +781,10 @@ def main() -> None:
     command.extend(device_arguments)
     command.extend(
         backend_arguments(
-            shlex.split(env_setting("COMFYUI_ARGS").strip()), rocm_ready, blackwell_ready
+            shlex.split(env_setting("COMFYUI_ARGS").strip()),
+            rocm_ready,
+            blackwell_ready,
+            low_memory,
         )
     )
     raise SystemExit(subprocess.call(command, cwd=str(comfyui_dir)))

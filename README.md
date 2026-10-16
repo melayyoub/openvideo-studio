@@ -253,13 +253,23 @@ that folder rather than renaming it in place.
 `hostbuf_file_reader_read failed` usually mean Windows ran out of physical or
 commit memory while staging model weights — large text encoders are staged
 through system RAM, and pinned transfer buffers must fit in physical RAM.
-Escalate in this order:
+The same exhaustion can also end a run with no traceback at all — the log
+simply stops mid-sampling, or an isolated custom-node worker (TRELLIS2, for
+example) reports `Subprocess worker died`. `WinError 1450` and
+`DefaultCPUAllocator: not enough memory` on a few-MB allocation are the same
+problem. The launcher prints a warning at startup when free RAM or commit
+headroom is already low. Escalate in this order:
 
-1. Free memory first (WSL/Docker and editor windows are common consumers)
-   and pick a smaller text-encoder variant (fp8/fp4 instead of fp16) when the
-   workflow allows it.
-2. `CUSTOM_WAN_COMFYUI_ARGS="--disable-pinned-memory"` — weight transfers
-   spill to the page file instead of failing.
+1. Free memory first (WSL/Docker, editor windows, and other ComfyUI or Python
+   jobs are common consumers), avoid running a large image model and a heavy
+   isolated 3D worker in the same session, and pick a smaller text-encoder
+   variant (fp8/fp4 instead of fp16) when the workflow allows it.
+2. `--disable-pinned-memory` — weight transfers spill to the page file
+   instead of failing. On Windows hosts with less than 48 GB of RAM the
+   launcher adds this by default, because ComfyUI otherwise page-locks up to
+   40% of RAM; set `OVS_PINNED_MEMORY=1` to keep pinned memory anyway.
+   Windows caps a system-managed page file at three times RAM; a larger,
+   custom-sized page file raises the commit limit when that cap is reached.
 3. `CUSTOM_WAN_COMFYUI_ARGS="--disable-pinned-memory --disable-dynamic-vram"`
    — dynamic VRAM streaming (comfy-aimdo) has had issues with quantized video
    models independent of free RAM; it is actively patched, so also keep
@@ -470,6 +480,20 @@ run:
 
 For more detail, see [Windows installer operations](docs/windows-installer.md)
 and [Linux/macOS installer operations](docs/unix-installer.md).
+
+### Access violation during VAE decode on RTX 50-series
+
+`Windows fatal exception: access violation` inside `decode_tiled_3d` on a
+Blackwell card (RTX 5090, sm_120) has been seen with ComfyUI's default
+`cudaMallocAsync` allocator plus async weight offload. Not yet reproduced
+reliably, so it is not a launcher default. To test it:
+
+```powershell
+$env:OVS_COMFYUI_ARGS = "--disable-cuda-malloc"
+npm run wstart:cuda
+```
+
+If the crash persists, add `--disable-async-offload` to the same variable.
 
 ## Community and maintenance
 
