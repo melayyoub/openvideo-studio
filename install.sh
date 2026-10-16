@@ -43,9 +43,15 @@ done
 
 echo "[install.sh] Base: $BASE_PATH  CUDA: $CUDA  MODELS: $MODELS  Manager: $WITH_MANAGER  SkipNodes: $SKIP_NODES  Start: $START  Port: $PORT  ListenAll: $LISTEN_ALL  ReuseVenv: $REUSE_VENV  DryRun: $DRY_RUN"
 
-if command -v python3 >/dev/null 2>&1; then PY=python3
-elif command -v python >/dev/null 2>&1; then PY=python
-else echo "ERROR: Python 3.10–3.12 not found."; exit 1; fi
+# Probe each candidate by running it: on Windows, python3 is often the
+# Microsoft Store alias, which exists on PATH but only prints an install hint.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys" >/dev/null 2>&1; then
+    PY="$candidate"; break
+  fi
+done
+[[ -n "$PY" ]] || { echo "ERROR: Python 3.10–3.12 not found."; exit 1; }
 
 [[ -n "$HF_TOKEN" ]] && export HF_TOKEN
 
