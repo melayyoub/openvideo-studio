@@ -137,6 +137,32 @@ def memory_warnings(status: dict[str, int] | None) -> list[str]:
     return warnings
 
 
+# Device-visibility variables that CUDA and ROCm read when they initialize.
+GPU_VISIBILITY_VARIABLES = ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
+
+def hides_every_gpu(value: str) -> bool:
+    """True when a *_VISIBLE_DEVICES value leaves no device visible.
+
+    CUDA stops reading the list at the first invalid index, so an empty value
+    or one that starts with -1 hides every GPU.
+    """
+    first = value.split(",")[0].strip()
+    return first == "" or first == "-1"
+
+
+def reveal_hidden_gpus(environ: dict[str, str] | os._Environ) -> list[str]:
+    """Drop visibility variables that hide every GPU; return the names dropped."""
+    dropped = [
+        name
+        for name in GPU_VISIBILITY_VARIABLES
+        if name in environ and hides_every_gpu(environ[name])
+    ]
+    for name in dropped:
+        del environ[name]
+    return dropped
+
+
 PIP_NETWORK_OPTIONS = ["--retries", "10", "--timeout", "120"]
 
 # ComfyUI's mutually exclusive attention backends. Any of these in COMFYUI_ARGS
@@ -668,6 +694,16 @@ def main() -> None:
         default=env_setting("COMFYUI_DEVICE", "auto").strip().lower() or "auto",
     )
     args = parser.parse_args()
+
+    if args.device in ("gpu", "rocm"):
+        # An explicit GPU request wins over a stray CUDA_VISIBLE_DEVICES=-1
+        # (often left in the user environment by another tool), which would
+        # otherwise make torch report no GPU in every environment we try.
+        for name in reveal_hidden_gpus(os.environ):
+            print(
+                f"[wan2_cli] Ignoring {name}, which hides every GPU, because "
+                f"--device {args.device} was requested."
+            )
 
     root = Path(args.path).expanduser().resolve()
     configured_checkout = (

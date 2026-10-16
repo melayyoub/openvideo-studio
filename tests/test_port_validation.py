@@ -141,6 +141,17 @@ class BackendArgumentTests(unittest.TestCase):
             ["--enable-manager"],
         )
 
+    def test_visibility_values_that_hide_every_gpu(self) -> None:
+        for value in ("-1", "", " -1 ", "-1,0"):
+            self.assertTrue(wan2_cli.hides_every_gpu(value), value)
+        for value in ("0", "1", "0,1", "GPU-1234"):
+            self.assertFalse(wan2_cli.hides_every_gpu(value), value)
+
+    def test_reveal_hidden_gpus_drops_only_hiding_variables(self) -> None:
+        environ = {"CUDA_VISIBLE_DEVICES": "-1", "HIP_VISIBLE_DEVICES": "0", "PATH": "x"}
+        self.assertEqual(wan2_cli.reveal_hidden_gpus(environ), ["CUDA_VISIBLE_DEVICES"])
+        self.assertEqual(environ, {"HIP_VISIBLE_DEVICES": "0", "PATH": "x"})
+
     def test_pinned_memory_is_disabled_on_low_memory_hosts(self) -> None:
         self.assertEqual(
             backend_arguments([], rocm=False, low_memory=True),
