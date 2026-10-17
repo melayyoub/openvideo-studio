@@ -270,7 +270,7 @@ headroom is already low. Escalate in this order:
    40% of RAM; set `OVS_PINNED_MEMORY=1` to keep pinned memory anyway.
    Windows caps a system-managed page file at three times RAM; a larger,
    custom-sized page file raises the commit limit when that cap is reached.
-3. `CUSTOM_WAN_COMFYUI_ARGS="--disable-pinned-memory --disable-dynamic-vram"`
+3. `OVS_COMFYUI_ARGS="--disable-pinned-memory --disable-dynamic-vram"`
    — dynamic VRAM streaming (comfy-aimdo) has had issues with quantized video
    models independent of free RAM; it is actively patched, so also keep
    ComfyUI and `comfy-aimdo` updated.
