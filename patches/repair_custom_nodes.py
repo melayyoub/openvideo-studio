@@ -28,6 +28,14 @@ def replace_once(path: Path, old: str, new: str) -> bool:
 
 
 def repair_pixal3d(comfyui: Path) -> None:
+    requirements = comfyui / "custom_nodes" / "comfyui-pixal3d" / "requirements.txt"
+    # pyrender pins PyOpenGL 3.1.0, so the node's >=3.1.7 constraint made the
+    # setup's final `pip check` fail immediately after a successful install.
+    replace_once(
+        requirements,
+        "PyOpenGL>=3.1.7",
+        "PyOpenGL==3.1.0",
+    )
     source = comfyui / "custom_nodes" / "comfyui-pixal3d" / "_pixal3d_src" / "pixal3d"
     features = source / "trainers" / "flow_matching" / "mixins" / "image_conditioned_proj.py"
     replace_once(
@@ -143,6 +151,68 @@ def install_missing_optional_dependencies(comfyui: Path) -> None:
     subprocess.run(command, check=True)
 
 
+def repair_pixal3d_dependencies(comfyui: Path) -> None:
+    """Run the node's pinned dependency installer when its runtime is incomplete.
+
+    Pixal3D includes CUDA/Torch ABI-specific Windows wheels such as o_voxel.
+    They must come from that node's requirements file, not generic PyPI
+    dependency guessing. Check in the target ComfyUI interpreter so this also
+    works when the repair script itself is invoked by a launcher Python.
+    """
+    node = comfyui / "custom_nodes" / "comfyui-pixal3d"
+    installer = node / "install.py"
+    requirements = node / "requirements.txt"
+    if not installer.is_file() or not requirements.is_file():
+        return
+
+    python = comfyui / ".venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        python = Path(sys.executable)
+    modules = [
+        "moge", "utils3d", "o_voxel", "flex_gemm", "cumesh",
+        "nvdiffrast", "triton", "natten", "flash_attn", "pipeline", "moderngl", "gradio",
+    ]
+    probe = (
+        "import importlib.util, json; "
+        f"mods = {modules!r}; "
+        "print(json.dumps([m for m in mods if importlib.util.find_spec(m) is None]))"
+    )
+    result = subprocess.run(
+        [str(python), "-c", probe], check=True, capture_output=True, text=True
+    )
+    import json
+    missing = json.loads(result.stdout.strip().splitlines()[-1])
+    if not missing:
+        return
+
+    print(
+        "[node-repair] Pixal3D runtime is missing "
+        f"{', '.join(missing)}; installing its pinned Windows requirements."
+    )
+
+    # The upstream requirements intentionally use --no-deps because MoGe
+    # declares a conflicting utils3d source dependency. Install those node
+    # requirements, then resolve the small set of omitted runtime deps.
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "--no-deps", "-r", str(requirements)],
+        check=True,
+    )
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "pipeline", "moderngl", "gradio", "PyOpenGL==3.1.0"],
+        check=True,
+    )
+
+    install_args = [str(python), str(installer)]
+    if (node / "_pixal3d_src" / "pixal3d").is_dir():
+        install_args.append("--skip-clone")
+    install_args.append("--skip-deps")
+    subprocess.run(
+        install_args,
+        cwd=str(node),
+        check=True,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--comfyui", type=Path, required=True)
@@ -153,6 +223,7 @@ def main() -> None:
     repair_optional_nodes(comfyui)
     if args.install_dependencies:
         install_missing_optional_dependencies(comfyui)
+        repair_pixal3d_dependencies(comfyui)
 
 
 if __name__ == "__main__":
