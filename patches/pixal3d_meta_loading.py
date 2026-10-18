@@ -106,6 +106,15 @@ NEW_FALLBACK = """            except Exception as e:
                 if isinstance(e, OSError) and getattr(e, 'winerror', None) == 1455:
                     raise
                 _models[k] = models.from_pretrained(v)"""
+CURRENT_FALLBACK = """            except Exception:
+                # A local snapshot's relative checkpoint paths must never be
+                # retried as Hugging Face repo IDs (e.g. "ckpts/foo"). That
+                # hides the actual local load failure, including Windows
+                # commit/pagefile exhaustion, behind a misleading HTTP 401.
+                # The fallback is only valid when the caller supplied a repo.
+                if is_local or os.path.isabs(path):
+                    raise
+                _models[k] = models.from_pretrained(v)"""
 
 
 def replace_once(path: Path, old: str, new: str) -> bool:
@@ -141,10 +150,17 @@ def patch_pixal3d(comfyui: Path) -> list[Path]:
             )
         model_loader.write_bytes(source.replace(previous, NEW, 1).encode("utf-8"))
         patched.append(model_loader)
-    if pipeline_loader.is_file() and replace_once(
-        pipeline_loader, OLD_FALLBACK, NEW_FALLBACK
-    ):
-        patched.append(pipeline_loader)
+    if pipeline_loader.is_file():
+        pipeline_source = pipeline_loader.read_text(encoding="utf-8")
+        if NEW_FALLBACK not in pipeline_source and CURRENT_FALLBACK not in pipeline_source:
+            if pipeline_source.count(OLD_FALLBACK) != 1:
+                raise RuntimeError(
+                    f"Could not safely patch Pixal3D pipeline fallback in {pipeline_loader}"
+                )
+            pipeline_loader.write_bytes(
+                pipeline_source.replace(OLD_FALLBACK, NEW_FALLBACK, 1).encode("utf-8")
+            )
+            patched.append(pipeline_loader)
     return patched
 
 

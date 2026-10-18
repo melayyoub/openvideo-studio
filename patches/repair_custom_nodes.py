@@ -38,6 +38,7 @@ def repair_pixal3d(comfyui: Path) -> None:
     )
     source = comfyui / "custom_nodes" / "comfyui-pixal3d" / "_pixal3d_src" / "pixal3d"
     features = source / "trainers" / "flow_matching" / "mixins" / "image_conditioned_proj.py"
+    replace_once(features, "self.naf_target_size = (512, 512)", "self.naf_target_size = (256, 256)")
     replace_once(
         features,
         """        for layer_module in self.model.layer:
@@ -66,9 +67,79 @@ def repair_pixal3d(comfyui: Path) -> None:
     )
     replace_once(
         features,
+        """                if _naf_fp16:
+                    self.naf_model.to(dtype=torch.float16)""",
+        """                if _naf_fp16:
+                    # Use a 512px conditioning feature map on RTX 50 series;
+                    # 1024px triggers an oversized NAF interpolation request.
+                    self.naf_target_size = (256, 256)
+                    self.naf_model.to(dtype=torch.float16)""",
+    )
+    replace_once(
+        features,
+        """                    lr_features_bchw = lr_features_bchw.to(dtype=torch.float16)
+                hr_features = self.naf_model(""",
+        """                    lr_features_bchw = lr_features_bchw.to(dtype=torch.float16)
+                    try:
+                        torch.cuda.set_per_process_memory_fraction(0.85, device=image_for_naf.device)
+                    except Exception:
+                        pass
+                hr_features = self.naf_model(""",
+    )
+
+    # NAF's CrossAttention used to upsample fp32 feature maps to 1024px and
+    # only cast after interpolation. That creates a multi-GiB temporary even
+    # when the caller and NAF weights were already moved to fp16. Cast before
+    # interpolation so the peak allocation follows the active attention dtype.
+    naf_attention = Path.home() / ".cache" / "torch" / "hub" / "valeoai_NAF_main" / "src" / "layers" / "attentions.py"
+    replace_once(
+        naf_attention,
+        """    def _resize(self, x, size, dtype):
+        x = F.interpolate(x, size=size, mode=\"nearest-exact\")
+        x = rearrange(x, \"b (n d) h w -> b h w n d\", n=self.num_heads)
+        return x.to(dtype)""",
+        """    def _resize(self, x, size, dtype):
+        if x.dtype != dtype:
+            x = x.to(dtype)
+        x = F.interpolate(x, size=size, mode=\"nearest-exact\")
+        return rearrange(x, \"b (n d) h w -> b h w n d\", n=self.num_heads)""",
+    )
+    replace_once(
+        naf_attention,
+        """    def forward(self, q, k, v, image=None, return_weights=False, **kwargs):
+        hq, wq = q.shape[-2:]""",
+        """    def forward(self, q, k, v, image=None, return_weights=False, **kwargs):
+        # The NAF image encoder can emit fp32 queries even when its source
+        # feature map was cast to fp16. Keep RTX 50 series high-resolution
+        # attention at fp16 so the 1024px upsample fits ComfyUI's memory cap.
+        if q.is_cuda:
+            try:
+                if torch.cuda.get_device_capability(q.device)[0] >= 12:
+                    q = q.to(torch.float16)
+            except Exception:
+                pass
+        hq, wq = q.shape[-2:]""",
+    )
+    replace_once(
+        features,
         """    grid = queries_ndc.view(B, K, 1, 2)  # (B, K, 1, 2)""",
         """    # grid_sample requires the grid and feature map to share a dtype.
     grid = queries_ndc.to(dtype=fmap.dtype).view(B, K, 1, 2)  # (B, K, 1, 2)""",
+    )
+    replace_once(
+        features,
+        """            # --- High-resolution branch (NAF): upsample then sample ---
+            if self.use_naf_upsample:
+                self._load_naf()""",
+        """            # --- High-resolution branch (NAF): upsample then sample ---
+            if self.use_naf_upsample:
+                # DINO is no longer needed once the compact projected LR
+                # features have been sampled. Free its weights before NAF's
+                # 1024px feature upsample to avoid overlapping both models.
+                self.model.cpu()
+                if image.is_cuda:
+                    torch.cuda.empty_cache()
+                self._load_naf()""",
     )
     replace_once(
         features,
@@ -87,9 +158,24 @@ def repair_pixal3d(comfyui: Path) -> None:
                     except Exception:
                         pass
                 if _naf_fp16:
+                    # A full 1024x1024 NAF feature tensor can exceed the
+                    # RTX 5090 ComfyUI process allocator's single-allocation
+                    # ceiling. Keep the balanced Pixal3D model/texture size,
+                    # while using a 256px conditioning feature map.
+                    self.naf_target_size = (256, 256)
                     self.naf_model.to(dtype=torch.float16)
                     image_for_naf = image_for_naf.to(dtype=torch.float16)
                     lr_features_bchw = lr_features_bchw.to(dtype=torch.float16)
+                    # ComfyUI can reserve only half of a 32GB RTX 5090 for
+                    # this process by default. Pixal3D's single NAF upsample
+                    # needs a contiguous 2GB allocation; raise the allocator
+                    # ceiling while low-VRAM mode has offloaded other stages.
+                    try:
+                        torch.cuda.set_per_process_memory_fraction(
+                            0.85, device=image_for_naf.device
+                        )
+                    except Exception:
+                        pass
                 hr_features = self.naf_model(
                     image_for_naf, lr_features_bchw, self.naf_target_size
                 )  # [B, D, H', W']""",
@@ -192,6 +278,95 @@ def repair_pixal3d(comfyui: Path) -> None:
     )
 
     stages = comfyui / "custom_nodes" / "comfyui-pixal3d" / "nodes" / "pixal3d_stages.py"
+    replace_once(
+        stages,
+        """    glb = o_voxel.postprocess.to_glb(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        attr_volume=mesh.attrs,
+        coords=mesh.coords,
+        attr_layout=pipeline.pbr_attr_layout,
+        grid_size=res,
+        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+        decimation_target=decimation_target,
+        texture_size=texture_size,
+        remesh=remesh,
+        remesh_band=1,
+        remesh_project=0,
+        use_tqdm=True,
+    )""",
+        """    _glb_args = dict(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        attr_volume=mesh.attrs,
+        coords=mesh.coords,
+        attr_layout=pipeline.pbr_attr_layout,
+        grid_size=res,
+        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+        decimation_target=decimation_target,
+        texture_size=texture_size,
+        remesh=remesh,
+        remesh_band=1,
+        remesh_project=0,
+        use_tqdm=True,
+    )
+    try:
+        glb = o_voxel.postprocess.to_glb(**_glb_args)
+    except RuntimeError as _error:
+        # CuMesh's optional remesh can exhaust CUDA memory on unusually dense
+        # shapes. Retry that mesh with the non-remesh UV path; keep the fast
+        # path for normal assets.
+        if not remesh or "out of memory" not in str(_error).lower():
+            raise
+        log.warning("[Pixal3D] CuMesh remesh ran out of memory; retrying GLB export without remesh")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        _glb_args["remesh"] = False
+        glb = o_voxel.postprocess.to_glb(**_glb_args)""",
+    )
+    replace_once(
+        stages,
+        """    mesh_list, (shape_slat, tex_slat, res) = pipeline.run(
+        preprocessed,
+        camera_params=camera_params,
+        seed=seed,
+        sparse_structure_sampler_params=ss_params,
+        shape_slat_sampler_params=shape_params,
+        tex_slat_sampler_params=tex_params,
+        preprocess_image=False,
+        return_latent=True,
+        pipeline_type=pipeline_type,
+        max_num_tokens=max_num_tokens,
+    )""",
+        """    # Some inputs/seeds can yield no active sparse voxels. Retry only that
+    # known sampling failure with the next seeds so one bad draw cannot abort
+    # a complete asset batch.
+    for _attempt in range(3):
+        _trial_seed = seed + _attempt
+        torch.manual_seed(_trial_seed)
+        try:
+            mesh_list, (shape_slat, tex_slat, res) = pipeline.run(
+                preprocessed,
+                camera_params=camera_params,
+                seed=_trial_seed,
+                sparse_structure_sampler_params=ss_params,
+                shape_slat_sampler_params=shape_params,
+                tex_slat_sampler_params=tex_params,
+                preprocess_image=False,
+                return_latent=True,
+                pipeline_type=pipeline_type,
+                max_num_tokens=max_num_tokens,
+            )
+            break
+        except RuntimeError as _error:
+            if "input.numel() == 0" not in str(_error) or _attempt == 2:
+                raise
+            log.warning(
+                f"[Pixal3D] Empty sparse shape for seed {_trial_seed}; "
+                f"retrying with seed {_trial_seed + 1}"
+            )""",
+    )
     replace_once(
         stages,
         'os.environ.setdefault("ATTN_BACKEND", "flash_attn")',
