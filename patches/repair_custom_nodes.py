@@ -105,6 +105,41 @@ def repair_pixal3d(comfyui: Path) -> None:
         out = torch.outer(x, self.freqs)""",
     )
 
+    sparse_config = source / "modules" / "sparse" / "config.py"
+    replace_once(
+        sparse_config,
+        "['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4']",
+        "['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4', 'sdpa']",
+    )
+    replace_once(
+        sparse_config,
+        "Literal['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4']",
+        "Literal['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4', 'sdpa']",
+    )
+
+    sparse_attention = source / "modules" / "sparse" / "attention" / "full_attn.py"
+    replace_once(
+        sparse_attention,
+        """    elif config.ATTN == 'flash_attn':""",
+        """    elif config.ATTN == 'sdpa':
+        from torch.nn.functional import scaled_dot_product_attention as sdpa
+        if num_all_args == 1:
+            q, k, v = qkv.unbind(dim=1)
+        elif num_all_args == 2:
+            k, v = kv.unbind(dim=1)
+        q_parts = torch.split(q, q_seqlen, dim=0)
+        k_parts = torch.split(k, kv_seqlen, dim=0)
+        v_parts = torch.split(v, kv_seqlen, dim=0)
+        out = torch.cat([
+            sdpa(qi.permute(1, 0, 2).unsqueeze(0),
+                 ki.permute(1, 0, 2).unsqueeze(0),
+                 vi.permute(1, 0, 2).unsqueeze(0))
+            .squeeze(0).permute(1, 0, 2)
+            for qi, ki, vi in zip(q_parts, k_parts, v_parts)
+        ], dim=0)
+    elif config.ATTN == 'flash_attn':""",
+    )
+
     stages = comfyui / "custom_nodes" / "comfyui-pixal3d" / "nodes" / "pixal3d_stages.py"
     replace_once(
         stages,
