@@ -66,6 +66,18 @@ def repair_pixal3d(comfyui: Path) -> None:
     )
 
     stages = comfyui / "custom_nodes" / "comfyui-pixal3d" / "nodes" / "pixal3d_stages.py"
+    replace_once(
+        stages,
+        'os.environ.setdefault("ATTN_BACKEND", "flash_attn")',
+        '''# The bundled FlashAttention wheel has no sm_120 kernel (RTX 50 series).
+# PyTorch SDPA selects a supported kernel for the active device at runtime.
+if "ATTN_BACKEND" not in os.environ:
+    try:
+        _sm = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
+    except Exception:
+        _sm = (0, 0)
+    os.environ["ATTN_BACKEND"] = "sdpa" if _sm >= (12, 0) else "flash_attn"''',
+    )
     old_builder = """    m = DinoV3ProjFeatureExtractor(**config)
     m.eval()"""
     new_builder = """    # Transformers 5.x's async safetensors copy can access-violate on Windows.
@@ -165,9 +177,17 @@ def repair_pixal3d_dependencies(comfyui: Path) -> None:
     if not installer.is_file() or not requirements.is_file():
         return
 
-    python = comfyui / ".venv" / "Scripts" / "python.exe"
-    if not python.is_file():
-        python = Path(sys.executable)
+    # Setup and launch entry points call this repair with the selected
+    # ComfyUI venv's interpreter. Prefer it so installs also work with named
+    # environments such as `.venv-cuda`; only fall back to the default venv
+    # when invoked from an unrelated Python.
+    python = Path(sys.executable).resolve()
+    try:
+        python.relative_to(comfyui.resolve())
+    except ValueError:
+        python = comfyui / ".venv" / "Scripts" / "python.exe"
+        if not python.is_file():
+            python = Path(sys.executable)
     modules = [
         "moge", "utils3d", "o_voxel", "flex_gemm", "cumesh",
         "nvdiffrast", "triton", "natten", "flash_attn", "pipeline", "moderngl", "gradio",
