@@ -317,8 +317,8 @@ elseif (Test-Path -LiteralPath (Join-Path $comfyPath '.git')) {
   }
 
   $autoStashMessage = $null
+  $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
   if ($trackedStatus.Count -gt 0) {
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $autoStashMessage = "custom-wan-installer-before-update-$stamp"
 
     Write-Warning 'Tracked local ComfyUI changes were found. They will be preserved in Git stash before updating.'
@@ -332,7 +332,94 @@ elseif (Test-Path -LiteralPath (Join-Path $comfyPath '.git')) {
   }
 
   try {
-    Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'pull', '--ff-only')
+    # `git pull` without an explicit upstream fails when ComfyUI is checked out
+    # at a release tag (detached HEAD), which is how this installer has
+    # historically provisioned some installations. Fetch and fast-forward to
+    # the remote's default branch explicitly so both attached and detached
+    # checkouts update deterministically.
+    Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'fetch', 'origin')
+
+    $remoteHead = @(
+      & git -C $comfyPath symbolic-ref --quiet --short refs/remotes/origin/HEAD
+    )
+    if ($LASTEXITCODE -ne 0 -or $remoteHead.Count -eq 0 -or [string]::IsNullOrWhiteSpace($remoteHead[0])) {
+      Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'remote', 'set-head', 'origin', '--auto')
+      $remoteHead = @(
+        & git -C $comfyPath symbolic-ref --quiet --short refs/remotes/origin/HEAD
+      )
+    }
+    if ($LASTEXITCODE -ne 0 -or $remoteHead.Count -eq 0 -or $remoteHead[0] -notmatch '^origin/.+') {
+      throw 'Unable to determine the ComfyUI origin default branch after fetching.'
+    }
+
+    $targetRef = $remoteHead[0].Trim()
+    $currentBranch = (& git -C $comfyPath branch --show-current | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($currentBranch)) {
+      $upstream = @(
+        & git -C $comfyPath rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
+      )
+      if ($LASTEXITCODE -eq 0 -and $upstream.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($upstream[0])) {
+        $targetRef = $upstream[0].Trim()
+      }
+    }
+
+    $isDetached = [string]::IsNullOrWhiteSpace($currentBranch)
+    & git -C $comfyPath merge-base --is-ancestor HEAD $targetRef
+    $canFastForward = ($LASTEXITCODE -eq 0)
+
+    if ($canFastForward) {
+      Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'merge', '--ff-only', $targetRef)
+    }
+    elseif ($isDetached) {
+      # Old installs may be detached at a release tag from a history that has
+      # since diverged from the remote default branch. Keep the original HEAD
+      # on a backup branch, move the working checkout to the new default tip,
+      # and replay self-contained custom-node commits (the in-tree Pixal3D
+      # installer is one such local addition). Core-history-only commits remain
+      # recoverable from the backup ref and are not replayed onto modern core.
+      $oldHead = (& git -C $comfyPath rev-parse HEAD | Out-String).Trim()
+      if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($oldHead)) {
+        throw 'Unable to record the current detached ComfyUI revision.'
+      }
+      $shortHead = $oldHead.Substring(0, [Math]::Min(8, $oldHead.Length))
+      $backupBranch = "custom-wan-backup-comfyui-$stamp-$shortHead"
+      Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'branch', $backupBranch, $oldHead)
+
+      $replayCommits = @(& git -C $comfyPath rev-list --reverse HEAD --not $targetRef)
+      if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to inspect detached ComfyUI commits before updating.'
+      }
+      $customNodeCommits = @()
+      foreach ($commit in $replayCommits) {
+        $changedPaths = @(& git -C $comfyPath diff-tree --no-commit-id --name-only -r $commit)
+        if ($LASTEXITCODE -ne 0) {
+          throw "Unable to inspect files in detached ComfyUI commit $commit."
+        }
+        if ($changedPaths.Count -gt 0 -and @($changedPaths | Where-Object { $_ -notlike 'custom_nodes/*' }).Count -eq 0) {
+          $customNodeCommits += $commit
+        }
+      }
+
+      Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'checkout', '--detach', $targetRef)
+      try {
+        foreach ($commit in $customNodeCommits) {
+          Invoke-Native -FilePath 'git' -ArgumentList @('-C', $comfyPath, 'cherry-pick', '--no-edit', $commit)
+        }
+      }
+      catch {
+        & git -C $comfyPath cherry-pick --abort *> $null
+        & git -C $comfyPath checkout --detach $backupBranch *> $null
+        throw
+      }
+
+      Write-Warning "ComfyUI history had diverged. The previous checkout is preserved as branch '$backupBranch'."
+      if ($customNodeCommits.Count -gt 0) {
+        Write-Host ("Reapplied {0} local custom-node commit(s) on the updated ComfyUI checkout." -f $customNodeCommits.Count) -ForegroundColor Cyan
+      }
+    }
+    else {
+      throw "The current ComfyUI branch '$currentBranch' cannot fast-forward to '$targetRef'. It was left unchanged."
+    }
   }
   catch {
     # If updating itself fails, restore the just-created stash when possible so
