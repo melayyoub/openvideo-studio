@@ -37,7 +37,86 @@ def repair_pixal3d(comfyui: Path) -> None:
         "PyOpenGL==3.1.0",
     )
     source = comfyui / "custom_nodes" / "comfyui-pixal3d" / "_pixal3d_src" / "pixal3d"
+    for package, payload, module_name in (
+        ("models", "pixal3d_lazy_checkpoint.py", "lazy_checkpoint.py"),
+        ("modules/sparse/conv", "pixal3d_safe_sparse_conv.py", "conv_torch.py"),
+    ):
+        if (source / package).is_dir():
+            payload_source = Path(__file__).with_name(payload).read_text(encoding="utf-8")
+            target = source / package / module_name
+            if not target.is_file() or target.read_text(encoding="utf-8") != payload_source:
+                target.write_text(payload_source, encoding="utf-8", newline="")
+                print(f"[node-repair] Patched {target}")
+    replace_once(
+        source / "modules" / "sparse" / "conv" / "conv_flex_gemm.py",
+        """def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
+    flex_gemm.ops.spconv.set_algorithm(config.FLEX_GEMM_ALGO)""",
+        """def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
+    import os
+    if os.name == 'nt' and x.feats.is_cuda and torch.cuda.get_device_capability(x.feats.device)[0] >= 12:
+        # The masked split-K kernel can abort in Windows Triton's LLVM
+        # compiler. Use bounded explicit GEMM on this architecture.
+        from .conv_torch import sparse_conv3d_forward as safe_forward
+        return safe_forward(self, x)
+    flex_gemm.ops.spconv.set_algorithm(config.FLEX_GEMM_ALGO)""",
+    )
+    base_pipeline = source / "pipelines" / "base.py"
+    replace_once(
+        base_pipeline,
+        'def from_pretrained(cls, path: str, config_file: str = "pipeline.json")',
+        'def from_pretrained(cls, path: str, config_file: str = "pipeline.json", *, lazy_models: bool = False)',
+    )
+    replace_once(
+        base_pipeline,
+        "        _models = {}",
+        """        from ..models.lazy_checkpoint import LazyCheckpoint
+        load_model = LazyCheckpoint if lazy_models else models.from_pretrained
+        _models = {}""",
+    )
+    for checkpoint_path in ("model_path", "v"):
+        replace_once(
+            base_pipeline,
+            f"_models[k] = models.from_pretrained({checkpoint_path})",
+            f"_models[k] = load_model({checkpoint_path})",
+        )
     sparse_pipeline = source / "pipelines" / "pixal3d_image_to_3d.py"
+    replace_once(
+        sparse_pipeline,
+        'def from_pretrained(cls, path: str, config_file: str = "pipeline.json")',
+        'def from_pretrained(cls, path: str, config_file: str = "pipeline.json", *, lazy_models: bool = False)',
+    )
+    replace_once(
+        sparse_pipeline,
+        "        pipeline = super().from_pretrained(path, config_file)",
+        "        pipeline = super().from_pretrained(path, config_file, lazy_models=lazy_models)",
+    )
+    replace_once(
+        sparse_pipeline,
+        """        z_global, z_proj = image_cond_model(
+            image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
+        )
+        grid_res = image_cond_model.grid_resolution
+        z_proj_grid = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)
+        batch_indices = coords[:, 0].long()
+        x_coords = coords[:, 1].long()
+        y_coords = coords[:, 2].long()
+        z_coords = coords[:, 3].long()
+        z_proj_sparse = z_proj_grid[batch_indices, x_coords, y_coords, z_coords]""",
+        """        # Only sample the sparse tokens the denoiser will consume.
+        # Building all 64^3 projected features before indexing them creates
+        # multi-GiB LR/HR tensors and a second allocation for concatenation.
+        grid_res = image_cond_model.grid_resolution
+        flat_indices = (coords[:, 1].long() * grid_res + coords[:, 2].long()) * grid_res + coords[:, 3].long()
+        full_grid = image_cond_model.proj_grid.grid_points
+        image_cond_model.proj_grid.grid_points = full_grid[flat_indices]
+        try:
+            z_global, z_proj = image_cond_model(
+                image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
+            )
+        finally:
+            image_cond_model.proj_grid.grid_points = full_grid
+        z_proj_sparse = z_proj[0]""",
+    )
     replace_once(
         sparse_pipeline,
         """        if self.low_vram:
@@ -56,6 +135,32 @@ def repair_pixal3d(comfyui: Path) -> None:
         # Decode sparse structure latent""",
     )
     features = source / "trainers" / "flow_matching" / "mixins" / "image_conditioned_proj.py"
+    # The four projection extractors differ in grids/image sizes, but use
+    # identical frozen DINO weights. Share the backbone instead of allocating
+    # four copies on the host and GPU during pipeline initialization.
+    replace_once(
+        features,
+        """        naf_target_size: Optional[List[int]] = None,
+    ):""",
+        """        naf_target_size: Optional[List[int]] = None,
+        backbone: Optional[nn.Module] = None,
+    ):""",
+    )
+    replace_once(
+        features,
+        "        self.model = DINOv3ViTModel.from_pretrained(model_name)",
+        "        self.model = backbone if backbone is not None else DINOv3ViTModel.from_pretrained(model_name)",
+    )
+    replace_once(
+        features,
+        """        image = image.to(self.model.embeddings.patch_embeddings.weight.dtype)
+        hidden_states = self.model.embeddings(image, bool_masked_pos=None)""",
+        """        # Another extractor or the NAF branch may have offloaded the
+        # shared frozen backbone since the previous conditioning stage.
+        self.model.to(image.device)
+        image = image.to(self.model.embeddings.patch_embeddings.weight.dtype)
+        hidden_states = self.model.embeddings(image, bool_masked_pos=None)""",
+    )
     replace_once(features, "self.naf_target_size = (512, 512)", "self.naf_target_size = (256, 256)")
     replace_once(
         features,
@@ -296,6 +401,38 @@ def repair_pixal3d(comfyui: Path) -> None:
     )
 
     stages = comfyui / "custom_nodes" / "comfyui-pixal3d" / "nodes" / "pixal3d_stages.py"
+    replace_once(
+        stages,
+        """    global _pipeline
+    if _pipeline is not None:""",
+        """    global _pipeline
+    if _pipeline is not None and low_vram and not _pipeline.low_vram:
+        # Rebuild eager caches when switching to disk-backed stage offload.
+        free_pipeline()
+    if _pipeline is not None:""",
+    )
+    replace_once(
+        stages,
+        "pipeline = Pixal3DImageTo3DPipeline.from_pretrained(local_snapshot)",
+        "pipeline = Pixal3DImageTo3DPipeline.from_pretrained(local_snapshot, lazy_models=low_vram)",
+    )
+    replace_once(
+        stages,
+        "def _build_image_cond_model(config: dict):",
+        "def _build_image_cond_model(config: dict, backbone=None):",
+    )
+    replace_once(
+        stages,
+        "        m = DinoV3ProjFeatureExtractor(**config)",
+        "        m = DinoV3ProjFeatureExtractor(**config, backbone=backbone)",
+    )
+    for stage in ("shape_512", "shape_1024", "tex_1024"):
+        replace_once(
+            stages,
+            f'pipeline.image_cond_model_{stage} = _build_image_cond_model(IMAGE_COND_CONFIGS["{stage}"])',
+            f'pipeline.image_cond_model_{stage} = _build_image_cond_model('
+            f'IMAGE_COND_CONFIGS["{stage}"], backbone=pipeline.image_cond_model_ss.model)',
+        )
     replace_once(
         stages,
         """    glb = o_voxel.postprocess.to_glb(

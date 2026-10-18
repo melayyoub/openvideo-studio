@@ -20,6 +20,11 @@ This runs `npm test` followed by `tests/validate.ps1`. The current suite checks:
 
 - the inclusive port contract (`1` through `65535`) in PowerShell and both
   Python launchers;
+- Windows Blackwell startup defaults, explicit allocator/offload overrides,
+  and detection in the selected Python environment;
+- Pixal3D patch idempotence, checkpoint header validation, tensor dtype
+  preservation, disk offload/reload, and chunked sparse convolution against
+  a dense reference (tensor checks require torch and safetensors);
 - Windows executable-lock detection plus non-destructive `Fail`, explicit
   scoped `Stop`, and guarded `.venv` deletion behavior;
 - PowerShell parsing for maintained scripts;

@@ -191,7 +191,7 @@ class BackendArgumentTests(unittest.TestCase):
     def test_cuda_malloc_is_disabled_on_blackwell(self) -> None:
         self.assertEqual(
             backend_arguments([], rocm=False, blackwell=True),
-            ["--disable-cuda-malloc", "--enable-manager"],
+            ["--disable-cuda-malloc", "--disable-async-offload", "--enable-manager"],
         )
 
     def test_cuda_malloc_default_is_not_added_off_blackwell(self) -> None:
@@ -203,12 +203,55 @@ class BackendArgumentTests(unittest.TestCase):
     def test_an_explicit_cuda_malloc_choice_replaces_the_blackwell_default(self) -> None:
         self.assertEqual(
             backend_arguments(["--cuda-malloc"], rocm=False, blackwell=True),
-            ["--enable-manager", "--cuda-malloc"],
+            ["--disable-async-offload", "--enable-manager", "--cuda-malloc"],
         )
         self.assertEqual(
             backend_arguments(["--disable-cuda-malloc"], rocm=False, blackwell=True),
-            ["--enable-manager", "--disable-cuda-malloc"],
+            ["--disable-async-offload", "--enable-manager", "--disable-cuda-malloc"],
         )
+
+    def test_explicit_offload_choices_preserve_the_allocator_default(self) -> None:
+        for choice in (["--async-offload", "3"], ["--async-offload=3"], ["--disable-async-offload"]):
+            with self.subTest(choice=choice):
+                self.assertEqual(
+                    backend_arguments(choice, rocm=False, blackwell=True),
+                    ["--disable-cuda-malloc", "--enable-manager", *choice],
+                )
+
+    def test_blackwell_probe_uses_the_selected_interpreter(self) -> None:
+        selected_python = REPOSITORY_ROOT / "alternate-venv" / "python.exe"
+        with unittest.mock.patch.object(wan2_cli.subprocess, "run") as run:
+            for returncode in (0, 1):
+                run.return_value.returncode = returncode
+                self.assertEqual(wan2_cli.cuda_is_blackwell(selected_python), returncode == 0)
+                self.assertEqual(run.call_args.args[0][0], str(selected_python))
+
+    def test_windows_blackwell_defaults_reach_the_comfyui_process(self) -> None:
+        # Exercise main: testing backend_arguments alone missed the disabled
+        # hardware probe, so the existing safeguard never reached ComfyUI.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "ComfyUI").mkdir()
+            (root / "ComfyUI" / "main.py").touch()
+            with (
+                unittest.mock.patch.dict(os.environ, {}, clear=True),
+                unittest.mock.patch.object(sys, "argv", ["wan2_cli.py", "start", "--path", str(root), "--device", "gpu"]),
+                unittest.mock.patch.object(sys, "platform", "win32"),
+                unittest.mock.patch.object(wan2_cli.importlib, "import_module", side_effect=ImportError),
+                unittest.mock.patch.object(wan2_cli, "cuda_available", return_value=True),
+                unittest.mock.patch.object(wan2_cli, "rocm_available", return_value=False),
+                unittest.mock.patch.object(wan2_cli, "cuda_is_blackwell", return_value=True) as probe,
+                unittest.mock.patch.object(wan2_cli, "ensure_comfyui_requirements"),
+                unittest.mock.patch.object(wan2_cli, "run_checked"),
+                unittest.mock.patch.object(wan2_cli, "windows_memory_status", return_value=None),
+                unittest.mock.patch.object(wan2_cli.subprocess, "call", return_value=0) as launch,
+                self.assertRaises(SystemExit) as exited,
+            ):
+                wan2_cli.main()
+            self.assertEqual(exited.exception.code, 0)
+            probe.assert_called_once_with(Path(sys.executable))
+            self.assertIn("--disable-cuda-malloc", launch.call_args.args[0])
+            self.assertIn("--disable-async-offload", launch.call_args.args[0])
 
 
 class RequirementsDriftTests(unittest.TestCase):

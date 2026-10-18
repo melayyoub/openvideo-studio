@@ -38,7 +38,7 @@ CURRENT_NEW = """    import torch
     except Exception:
         model = model_class(**config['args'], **kwargs)
         model.load_state_dict(load_file(model_file), strict=False)"""
-NEW = """    import numpy as np
+PREVIOUS_NUMPY = """    import numpy as np
     import torch
     from safetensors import safe_open
     model_class = __getattr__(config['name'])
@@ -66,6 +66,36 @@ NEW = """    import numpy as np
                 'then restart ComfyUI.',
             ) from exc
         raise"""
+PREVIOUS_PREAD = PREVIOUS_NUMPY.replace(
+    "        with safe_open(model_file, framework='np', device='cpu') as checkpoint:",
+    "        # Stream tensor bytes instead of committing a full-file mmap on Windows.\n"
+    "        with safe_open(model_file, framework='np', device='cpu', backend='pread') as checkpoint:",
+).replace("Copy the mmap-backed NumPy view", "Copy the NumPy buffer")
+PREVIOUS_STREAMED = """    import torch
+    from .checkpoint_reader import load_checkpoint
+    model_class = __getattr__(config['name'])
+    try:
+        with torch.device('meta'):
+            model = model_class(**config['args'], **kwargs)
+        state_dict = load_checkpoint(model_file, model.state_dict())
+        model.load_state_dict(state_dict, strict=True, assign=True)
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) == 1455 or getattr(exc, 'errno', None) == 1455:
+            raise OSError(
+                1455,
+                f'Windows ran out of commit memory loading Pixal3D checkpoint {model_file}. '
+                'Close memory-heavy applications or increase the Windows paging file, '
+                'then restart ComfyUI.',
+            ) from exc
+        raise"""
+NEW = PREVIOUS_STREAMED.replace(
+    "    model_class = __getattr__(config['name'])",
+    "    checkpoint_device = kwargs.pop('_checkpoint_device', 'cpu')\n"
+    "    model_class = __getattr__(config['name'])",
+).replace(
+    "load_checkpoint(model_file, model.state_dict())",
+    "load_checkpoint(model_file, model.state_dict(), device=checkpoint_device)",
+)
 PREVIOUS_NEW = """    import torch
     model_class = __getattr__(config['name'])
     try:
@@ -137,10 +167,15 @@ def patch_pixal3d(comfyui: Path) -> list[Path]:
         return []
 
     patched = []
+    reader_source = Path(__file__).with_name("pixal3d_checkpoint_reader.py").read_text(encoding="utf-8")
+    reader_path = model_loader.with_name("checkpoint_reader.py")
+    if not reader_path.is_file() or reader_path.read_text(encoding="utf-8") != reader_source:
+        reader_path.write_text(reader_source, encoding="utf-8", newline="")
+        patched.append(reader_path)
     source = model_loader.read_text(encoding="utf-8")
     if NEW not in source:
         previous = next(
-            (candidate for candidate in (OLD, CURRENT_NEW, PREVIOUS_NEW, PREVIOUS_META)
+            (candidate for candidate in (OLD, CURRENT_NEW, PREVIOUS_NEW, PREVIOUS_META, PREVIOUS_NUMPY, PREVIOUS_PREAD, PREVIOUS_STREAMED)
              if source.count(candidate) == 1),
             None,
         )
@@ -152,13 +187,27 @@ def patch_pixal3d(comfyui: Path) -> list[Path]:
         patched.append(model_loader)
     if pipeline_loader.is_file():
         pipeline_source = pipeline_loader.read_text(encoding="utf-8")
-        if NEW_FALLBACK not in pipeline_source and CURRENT_FALLBACK not in pipeline_source:
-            if pipeline_source.count(OLD_FALLBACK) != 1:
+        recognized_fallbacks = (
+            candidate.replace("models.from_pretrained(v)", loader)
+            for candidate in (NEW_FALLBACK, CURRENT_FALLBACK)
+            for loader in ("models.from_pretrained(v)", "load_model(v)")
+        )
+        if not any(candidate in pipeline_source for candidate in recognized_fallbacks):
+            old_fallback = next(
+                (candidate for candidate in (OLD_FALLBACK, OLD_FALLBACK.replace(
+                    "models.from_pretrained(v)", "load_model(v)"
+                )) if pipeline_source.count(candidate) == 1),
+                None,
+            )
+            if old_fallback is None:
                 raise RuntimeError(
                     f"Could not safely patch Pixal3D pipeline fallback in {pipeline_loader}"
                 )
+            new_fallback = NEW_FALLBACK
+            if "load_model(v)" in old_fallback:
+                new_fallback = new_fallback.replace("models.from_pretrained(v)", "load_model(v)")
             pipeline_loader.write_bytes(
-                pipeline_source.replace(OLD_FALLBACK, NEW_FALLBACK, 1).encode("utf-8")
+                pipeline_source.replace(old_fallback, new_fallback, 1).encode("utf-8")
             )
             patched.append(pipeline_loader)
     return patched

@@ -481,19 +481,21 @@ run:
 For more detail, see [Windows installer operations](docs/windows-installer.md)
 and [Linux/macOS installer operations](docs/unix-installer.md).
 
-### Access violation during VAE decode on RTX 50-series
+### Access violations on RTX 50-series
 
-`Windows fatal exception: access violation` inside `decode_tiled_3d` on a
-Blackwell card (RTX 5090, sm_120) has been seen with ComfyUI's default
-`cudaMallocAsync` allocator plus async weight offload. Not yet reproduced
-reliably, so it is not a launcher default. To test it:
+Windows access violations have been reported during VAE decode and Pixal3D
+model offloads on RTX 5090 (sm_120). The launcher now automatically passes
+`--disable-cuda-malloc --disable-async-offload` on Windows Blackwell GPUs,
+using the native CUDA allocator and synchronous ComfyUI offloads. Other GPU
+architectures retain ComfyUI's defaults.
+
+Explicit allocator and offload choices in `OVS_COMFYUI_ARGS` override these
+defaults independently. For example, to opt back into both async paths:
 
 ```powershell
-$env:OVS_COMFYUI_ARGS = "--disable-cuda-malloc"
+$env:OVS_COMFYUI_ARGS = "--cuda-malloc --async-offload 2"
 npm run wstart:cuda
 ```
-
-If the crash persists, add `--disable-async-offload` to the same variable.
 
 ## Community and maintenance
 

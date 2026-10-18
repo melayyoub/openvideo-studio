@@ -45,7 +45,7 @@ def rocm_available() -> bool:
         return False
 
 
-def cuda_is_blackwell() -> bool:
+def cuda_is_blackwell(python_path: Path | None = None) -> bool:
     """True on RTX 50-series and newer (compute capability 10.0+, sm_120 etc).
 
     cudaMallocAsync's stream-ordered allocator, combined with the extra CUDA
@@ -56,6 +56,13 @@ def cuda_is_blackwell() -> bool:
     hit this; disabling cudaMallocAsync there would only cost them its real
     performance benefit for no reason, so this stays scoped to Blackwell.
     """
+    if python_path is not None and python_path.resolve() != Path(sys.executable).resolve():
+        probe = (
+            "import sys, torch; "
+            "sys.exit(0 if torch.cuda.is_available() and "
+            "torch.cuda.get_device_capability(0)[0] >= 10 else 1)"
+        )
+        return subprocess.run([str(python_path), "-c", probe], check=False).returncode == 0
     try:
         import torch
 
@@ -284,6 +291,7 @@ MANAGER_ARGUMENTS = frozenset({"--enable-manager", "--enable-manager-legacy-ui"}
 
 # An explicit choice either way in COMFYUI_ARGS wins over the Blackwell default.
 CUDA_MALLOC_ARGUMENTS = frozenset({"--cuda-malloc", "--disable-cuda-malloc"})
+ASYNC_OFFLOAD_ARGUMENTS = frozenset({"--async-offload", "--disable-async-offload"})
 # An explicit choice in COMFYUI_ARGS wins over the low-memory default.
 PINNED_MEMORY_ARGUMENTS = frozenset({"--disable-pinned-memory"})
 
@@ -646,6 +654,7 @@ def backend_arguments(
     flag in COMFYUI_ARGS always wins over the matching default.
     """
     arguments = []
+    explicit_options = {argument.split("=", 1)[0] for argument in extra_args}
     if rocm and not ATTENTION_ARGUMENTS.intersection(extra_args):
         arguments.append("--use-pytorch-cross-attention")
     if blackwell and not CUDA_MALLOC_ARGUMENTS.intersection(extra_args):
@@ -656,6 +665,8 @@ def backend_arguments(
         # RTX 30/40-series don't hit this and would just lose the allocator's
         # real performance benefit for nothing.
         arguments.append("--disable-cuda-malloc")
+    if blackwell and not ASYNC_OFFLOAD_ARGUMENTS.intersection(explicit_options):
+        arguments.append("--disable-async-offload")
     if low_memory and not PINNED_MEMORY_ARGUMENTS.intersection(extra_args):
         # See LOW_MEMORY_HOST_BYTES.
         arguments.append("--disable-pinned-memory")
@@ -806,13 +817,18 @@ def main() -> None:
         ]
     )
 
-    # NOT auto-enabled: a synthetic alloc-heavy benchmark on an RTX 5090 showed
-    # no measurable difference (11.7ms vs 10.9ms/step) between cudaMallocAsync
-    # and the native allocator, so there's nothing confirmed here to trade
-    # performance for. cuda_is_blackwell() stays available so a real, verified
-    # need can gate this again later -- see CUDA_MALLOC_ARGUMENTS for the
-    # explicit opt-in via COMFYUI_ARGS in the meantime.
-    blackwell_ready = False
+    # Native access violations also occur during Pixal3D CPU offloads, before
+    # VAE decode. Apply the existing allocator safeguard to the actual launch
+    # interpreter, and disable ComfyUI's extra offload streams on Windows.
+    blackwell_ready = (
+        sys.platform == "win32"
+        and not using_directml
+        and "--cpu" not in device_arguments
+        and not rocm_ready
+        and cuda_is_blackwell(launch_python)
+    )
+    if blackwell_ready:
+        print("[wan2_cli] Using native CUDA allocation and synchronous offload defaults on Blackwell.")
 
     if rocm_ready:
         # ROCm gates its fused attention kernels off on RDNA3 behind this flag,

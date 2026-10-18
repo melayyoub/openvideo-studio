@@ -1,8 +1,25 @@
 # Custom node patches
 
-Fixes for third-party custom nodes. `ComfyUI/custom_nodes/` is gitignored, so
-nothing here is applied automatically — re-run a patch after installing,
-updating, or reinstalling the node it targets.
+Fixes for third-party custom nodes. The launcher automatically runs
+`repair_custom_nodes.py` and `pixal3d_meta_loading.py` against the selected
+ComfyUI checkout. Other standalone patches below have manual instructions.
+
+## Pixal3D memory and Windows compatibility
+
+The startup repairs validate safetensors headers and read one tensor at a
+time into owned buffers, transferring each tensor directly to the active
+stage's device. Opening a large checkpoint does not require a full-file
+memory mapping or a second checkpoint-sized commit reservation.
+
+With Pixal3D's `low_vram` option, checkpoints load one stage at a time and CPU
+offload releases the active weights. Later stages reload from disk, avoiding
+large GPU-to-CPU copies and keeping inactive stages out of host memory. The
+four projection extractors share their identical frozen DINO backbone.
+
+On Windows RTX 50-series GPUs, sparse convolutions use chunked PyTorch matrix
+multiplications to avoid a native abort in Triton's masked split-K compiler.
+The im2col temporary is limited to 64 MiB per chunk. Disk reloads and this
+convolution path can increase generation time.
 
 ## controlnet_instantx_format2.py — drop-in replacement
 

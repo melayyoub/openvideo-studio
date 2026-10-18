@@ -52,7 +52,9 @@ $pythonCommand = $python[0]
 $pythonArguments = @($pythonArguments) + @(
   '-m',
   'unittest',
-  'tests.test_port_validation'
+  'discover',
+  '-s', 'tests',
+  '-p', 'test_*.py'
 )
 & $pythonCommand @pythonArguments
 if ($LASTEXITCODE -ne 0) {
