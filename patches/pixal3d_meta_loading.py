@@ -9,7 +9,7 @@ from pathlib import Path
 
 OLD = """    model = __getattr__(config['name'])(**config['args'], **kwargs)
     model.load_state_dict(load_file(model_file), strict=False)"""
-NEW = """    import torch
+CURRENT_NEW = """    import torch
     from safetensors import safe_open
     model_class = __getattr__(config['name'])
     try:
@@ -38,6 +38,34 @@ NEW = """    import torch
     except Exception:
         model = model_class(**config['args'], **kwargs)
         model.load_state_dict(load_file(model_file), strict=False)"""
+NEW = """    import numpy as np
+    import torch
+    from safetensors import safe_open
+    model_class = __getattr__(config['name'])
+    try:
+        with torch.device('meta'):
+            model = model_class(**config['args'], **kwargs)
+        state_dict = model.state_dict()
+        with safe_open(model_file, framework='np', device='cpu') as checkpoint:
+            if set(state_dict) != set(checkpoint.keys()):
+                raise ValueError('Pixal3D checkpoint keys do not match the model')
+            for key in checkpoint.keys():
+                # Copy the mmap-backed NumPy view before creating a Torch tensor.
+                # PyTorch's safetensors storage path can access-violate on Windows.
+                tensor = torch.from_numpy(np.array(checkpoint.get_tensor(key), copy=True))
+                if tensor.dtype != state_dict[key].dtype:
+                    tensor = tensor.to(dtype=state_dict[key].dtype)
+                state_dict[key] = tensor
+        model.load_state_dict(state_dict, strict=False, assign=True)
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) == 1455:
+            raise OSError(
+                1455,
+                f'Windows ran out of commit memory loading Pixal3D checkpoint {model_file}. '
+                'Close memory-heavy applications or increase the Windows paging file, '
+                'then restart ComfyUI.',
+            ) from exc
+        raise"""
 PREVIOUS_NEW = """    import torch
     model_class = __getattr__(config['name'])
     try:
@@ -103,7 +131,7 @@ def patch_pixal3d(comfyui: Path) -> list[Path]:
     source = model_loader.read_text(encoding="utf-8")
     if NEW not in source:
         previous = next(
-            (candidate for candidate in (OLD, PREVIOUS_NEW, PREVIOUS_META)
+            (candidate for candidate in (OLD, CURRENT_NEW, PREVIOUS_NEW, PREVIOUS_META)
              if source.count(candidate) == 1),
             None,
         )

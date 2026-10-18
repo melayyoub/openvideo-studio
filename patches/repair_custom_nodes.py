@@ -220,6 +220,12 @@ def main() -> None:
     args = parser.parse_args()
     comfyui = args.comfyui.resolve()
     repair_pixal3d(comfyui)
+    pixal3d_loader_patch = Path(__file__).with_name("pixal3d_meta_loading.py")
+    if pixal3d_loader_patch.is_file():
+        subprocess.run(
+            [sys.executable, str(pixal3d_loader_patch), "--comfyui", str(comfyui)],
+            check=True,
+        )
     repair_optional_nodes(comfyui)
     if args.install_dependencies:
         install_missing_optional_dependencies(comfyui)
