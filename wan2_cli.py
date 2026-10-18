@@ -786,6 +786,16 @@ def main() -> None:
     run_checked(
         [str(launch_python), str(pixi_fallback), "--python", str(launch_python)]
     )
+    node_repair = Path(__file__).resolve().parent / "patches" / "repair_custom_nodes.py"
+    run_checked(
+        [
+            str(launch_python),
+            str(node_repair),
+            "--comfyui",
+            str(comfyui_dir),
+            "--install-dependencies",
+        ]
+    )
     pixal3d_patch = Path(__file__).resolve().parent / "patches" / "pixal3d_meta_loading.py"
     run_checked(
         [

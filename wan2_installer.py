@@ -687,6 +687,19 @@ def main() -> None:
             install_required_nodes(venv, base, dry=dry)
 
         python = py_exec(venv_bin=venv / ("Scripts" if is_windows() else "bin"))
+        if is_windows():
+            repair_script = Path(__file__).resolve().parent / "patches" / "repair_custom_nodes.py"
+            if repair_script.is_file():
+                run(
+                    [
+                        python,
+                        str(repair_script),
+                        "--comfyui",
+                        str(comfy_root(base)),
+                        "--install-dependencies",
+                    ],
+                    dry=dry,
+                )
         run([python, "-m", "pip", "check"], cwd=comfy_root(base), dry=dry)
 
         # 4) Models (optional)

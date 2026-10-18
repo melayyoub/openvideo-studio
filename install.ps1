@@ -643,6 +643,17 @@ if torch.cuda.is_available():
 
 Invoke-Native -FilePath $venvPython -ArgumentList @('-c', $verifyCode)
 
+# Repair optional custom nodes after their repositories and dependencies are
+# present. The launcher repeats this idempotent preflight for reused installs.
+$nodeRepair = Join-Path $PSScriptRoot 'patches\repair_custom_nodes.py'
+if (Test-Path -LiteralPath $nodeRepair -PathType Leaf) {
+  Invoke-Native -FilePath $venvPython -ArgumentList @(
+    $nodeRepair,
+    '--comfyui', $comfyPath,
+    '--install-dependencies'
+  )
+}
+
 Write-Host ''
 Write-Host '[install.ps1] Installation completed.' -ForegroundColor Green
 Write-Host ("Root:       {0}" -f $BasePath)
