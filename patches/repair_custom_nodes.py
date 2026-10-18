@@ -108,8 +108,8 @@ def repair_pixal3d(comfyui: Path) -> None:
     sparse_config = source / "modules" / "sparse" / "config.py"
     replace_once(
         sparse_config,
-        "['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4']",
-        "['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4', 'sdpa']",
+        "env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4']:",
+        "env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3', 'flash_attn_4', 'sdpa']:",
     )
     replace_once(
         sparse_config,
