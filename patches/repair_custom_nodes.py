@@ -65,6 +65,46 @@ def repair_pixal3d(comfyui: Path) -> None:
         )""",
     )
 
+    # Meta-device construction leaves these plain (non-buffer) positional
+    # frequency tensors unmaterialized. Recreate them lazily before moving to
+    # CUDA; state_dict assignment cannot supply them because they are not
+    # checkpoint weights.
+    sparse_rope = source / "modules" / "sparse" / "attention" / "rope.py"
+    replace_once(
+        sparse_rope,
+        """        self.freqs = self.freqs.to(indices.device)
+        phases = torch.outer(indices, self.freqs)""",
+        """        if self.freqs.is_meta:
+            freq = torch.arange(self.freq_dim, dtype=torch.float32) / self.freq_dim
+            self.freqs = self.rope_freq[0] / (self.rope_freq[1] ** freq)
+        self.freqs = self.freqs.to(indices.device)
+        phases = torch.outer(indices, self.freqs)""",
+    )
+
+    dense_rope = source / "modules" / "attention" / "rope.py"
+    replace_once(
+        dense_rope,
+        """        self.freqs = self.freqs.to(indices.device)
+        phases = torch.outer(indices, self.freqs)""",
+        """        if self.freqs.is_meta:
+            freq = torch.arange(self.freq_dim, dtype=torch.float32) / self.freq_dim
+            self.freqs = self.rope_freq[0] / (self.rope_freq[1] ** freq)
+        self.freqs = self.freqs.to(indices.device)
+        phases = torch.outer(indices, self.freqs)""",
+    )
+
+    abs_pos = source / "modules" / "transformer" / "blocks.py"
+    replace_once(
+        abs_pos,
+        """        self.freqs = self.freqs.to(x.device)
+        out = torch.outer(x, self.freqs)""",
+        """        if self.freqs.is_meta:
+            freq = torch.arange(self.freq_dim, dtype=torch.float32) / self.freq_dim
+            self.freqs = 1.0 / (10000 ** freq)
+        self.freqs = self.freqs.to(x.device)
+        out = torch.outer(x, self.freqs)""",
+    )
+
     stages = comfyui / "custom_nodes" / "comfyui-pixal3d" / "nodes" / "pixal3d_stages.py"
     replace_once(
         stages,
