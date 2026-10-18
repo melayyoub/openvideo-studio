@@ -64,6 +64,57 @@ def repair_pixal3d(comfyui: Path) -> None:
             hidden_states, hidden_states.shape[-1:]
         )""",
     )
+    replace_once(
+        features,
+        """    grid = queries_ndc.view(B, K, 1, 2)  # (B, K, 1, 2)""",
+        """    # grid_sample requires the grid and feature map to share a dtype.
+    grid = queries_ndc.to(dtype=fmap.dtype).view(B, K, 1, 2)  # (B, K, 1, 2)""",
+    )
+    replace_once(
+        features,
+        """                lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)  # [B, D, h, w]
+                hr_features = self.naf_model(
+                    image_for_naf, lr_features_bchw, self.naf_target_size
+                )  # [B, D, H', W']""",
+        """                lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)  # [B, D, h, w]
+                # The 1024px texture NAF can create a 4 GiB feature map in
+                # fp32. RTX 50 series ComfyUI runs with a 16 GiB per-process
+                # budget, so use fp16 for NAF and its grid sampling there.
+                _naf_fp16 = False
+                if image_for_naf.is_cuda:
+                    try:
+                        _naf_fp16 = torch.cuda.get_device_capability(image_for_naf.device)[0] >= 12
+                    except Exception:
+                        pass
+                if _naf_fp16:
+                    self.naf_model.to(dtype=torch.float16)
+                    image_for_naf = image_for_naf.to(dtype=torch.float16)
+                    lr_features_bchw = lr_features_bchw.to(dtype=torch.float16)
+                hr_features = self.naf_model(
+                    image_for_naf, lr_features_bchw, self.naf_target_size
+                )  # [B, D, H', W']""",
+    )
+    replace_once(
+        features,
+        """                z_proj_hr = self.proj_grid(
+                    hr_features,
+                    camera_angle_x,
+                    distance,
+                    mesh_scale,
+                    transform_matrix,
+                    BHWC=False  # hr_features is [B, C, H', W']
+                )""",
+        """                z_proj_hr = self.proj_grid(
+                    hr_features,
+                    camera_angle_x,
+                    distance,
+                    mesh_scale,
+                    transform_matrix,
+                    BHWC=False  # hr_features is [B, C, H', W']
+                )
+                if z_proj_hr.dtype != z_proj_lr.dtype:
+                    z_proj_hr = z_proj_hr.to(dtype=z_proj_lr.dtype)""",
+    )
 
     # Meta-device construction leaves these plain (non-buffer) positional
     # frequency tensors unmaterialized. Recreate them lazily before moving to
