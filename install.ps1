@@ -596,7 +596,7 @@ $env:GIT_CLONE_PROTECTION_ACTIVE = 'false'
 $corePackages = @(
   'protobuf>=4.25,<5',
   'onnx',
-  'huggingface_hub',
+  'huggingface_hub>=1.32,<2',
   'regex',
   'librosa',
   'ffmpeg-python',
@@ -640,12 +640,28 @@ foreach ($package in $optionalPackages) {
   }
 }
 
+# Repair optional custom nodes before the final dependency constraints and
+# `pip check`, so their package installs are included in the clean-graph check.
+$nodeRepair = Join-Path $PSScriptRoot 'patches\repair_custom_nodes.py'
+if (Test-Path -LiteralPath $nodeRepair -PathType Leaf) {
+  Invoke-Native -FilePath $venvPython -ArgumentList @(
+    $nodeRepair,
+    '--comfyui', $comfyPath,
+    '--install-dependencies'
+  )
+}
+
 # Optional audio packages have historically imposed older CLI dependency
 # bounds. Restore the core-compatible versions, then require a clean graph.
 Invoke-NativeWithRetry -FilePath $venvPython -ArgumentList (
   @('-m', 'pip', 'install', '--upgrade') +
   $pipNetworkOptions +
-  @('click>=8.4.2,<9', 'typer>=0.27,<1')
+  @(
+    'click>=8.4.2,<9',
+    'typer>=0.27,<1',
+    'huggingface_hub>=1.32,<2',
+    'protobuf>=4.25.1,<5'
+  )
 )
 Invoke-Native -FilePath $venvPython -ArgumentList @('-m', 'pip', 'check')
 
@@ -732,17 +748,6 @@ if torch.cuda.is_available():
 }
 
 Invoke-Native -FilePath $venvPython -ArgumentList @('-c', $verifyCode)
-
-# Repair optional custom nodes after their repositories and dependencies are
-# present. The launcher repeats this idempotent preflight for reused installs.
-$nodeRepair = Join-Path $PSScriptRoot 'patches\repair_custom_nodes.py'
-if (Test-Path -LiteralPath $nodeRepair -PathType Leaf) {
-  Invoke-Native -FilePath $venvPython -ArgumentList @(
-    $nodeRepair,
-    '--comfyui', $comfyPath,
-    '--install-dependencies'
-  )
-}
 
 Write-Host ''
 Write-Host '[install.ps1] Installation completed.' -ForegroundColor Green

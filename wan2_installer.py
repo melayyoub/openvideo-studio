@@ -329,7 +329,7 @@ def install_manager(venv: Path, base: Path, dry: bool = False) -> None:
 
 def install_hf_cli(venv: Path, dry: bool = False) -> None:
     # only the library is needed; we use the Python API (no external CLI launcher)
-    pip(venv, ["huggingface_hub>=0.23"], dry=dry)
+    pip(venv, ["huggingface_hub>=1.32,<2"], dry=dry)
 
 
 def hf_login(venv: Path, token: Optional[str], dry: bool = False) -> None:
@@ -700,6 +700,17 @@ def main() -> None:
                     ],
                     dry=dry,
                 )
+            run(
+                [
+                    python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "huggingface_hub>=1.32,<2",
+                    "protobuf>=4.25.1,<5",
+                ],
+                dry=dry,
+            )
         run([python, "-m", "pip", "check"], cwd=comfy_root(base), dry=dry)
 
         # 4) Models (optional)
