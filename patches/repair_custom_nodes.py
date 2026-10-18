@@ -37,6 +37,24 @@ def repair_pixal3d(comfyui: Path) -> None:
         "PyOpenGL==3.1.0",
     )
     source = comfyui / "custom_nodes" / "comfyui-pixal3d" / "_pixal3d_src" / "pixal3d"
+    sparse_pipeline = source / "pipelines" / "pixal3d_image_to_3d.py"
+    replace_once(
+        sparse_pipeline,
+        """        if self.low_vram:
+            flow_model.cpu()
+        
+        # Decode sparse structure latent""",
+        """        if self.low_vram:
+            # Finish queued sampler kernels before transferring the model.
+            # On Windows, starting the recursive GPU-to-CPU copy while CUDA
+            # work is still pending can terminate the process in PyTorch's
+            # Module._apply path instead of raising a Python exception.
+            if noise.is_cuda:
+                torch.cuda.synchronize(noise.device)
+            flow_model.cpu()
+        
+        # Decode sparse structure latent""",
+    )
     features = source / "trainers" / "flow_matching" / "mixins" / "image_conditioned_proj.py"
     replace_once(features, "self.naf_target_size = (512, 512)", "self.naf_target_size = (256, 256)")
     replace_once(
