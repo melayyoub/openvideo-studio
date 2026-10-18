@@ -1,0 +1,90 @@
+{
+  "project": {
+    "name": "milo_and_ember",
+    "root": "./projects/milo_and_ember",
+    "seed": 84,
+    "aspect": "9:16 (Portrait Widescreen)",
+    "width": 768,
+    "height": 1344,
+    "fps": 25,
+    "scene_duration": 10,
+    "scene_count": 8
+  },
+
+  "story_input": {
+    "subject": "a small boy and his tiny dragon find a valley of floating islands",
+    "mood": "warm, wondrous, gently adventurous",
+    "age": 6,
+    "language": "en",
+    "extra": ""
+  },
+
+  "ollama": {
+    "url": "http://localhost:11434",
+    "text_model": "qwen2.5:14b-instruct",
+    "vision_model": "llava:13b-v1.6",
+    "timeout": 600,
+    "temperature_story": 0.85,
+    "temperature_director": 0.35,
+    "temperature_audit": 0.1,
+    "num_ctx": 8192,
+    "max_repair_attempts": 3
+  },
+
+  "comfy": {
+    "url": "http://127.0.0.1:8188",
+    "timeout": 1800,
+    "poll_interval": 2.0,
+    "input_dir": "C:/Users/samsa/python-projects/custom-wan/ComfyUI/input",
+    "output_dir": "C:/Users/samsa/python-projects/custom-wan/ComfyUI/output",
+    "extra_args_note": "OpenVideo Studio: set CUSTOM_WAN_COMFYUI_ARGS=--disable-pinned-memory before launching for quantized LTX models"
+  },
+
+  "cast": {
+    "source_dir": "./cast_sources",
+    "views_per_character": 10,
+    "turnaround_template": "./templates/qwen_edit_turnaround.api.json",
+    "turnaround_patch_map": {
+      "image": "LoadImage",
+      "prompt": "PositivePrompt",
+      "negative": "NegativePrompt",
+      "sampler": "KSampler",
+      "save": "SaveImage",
+      "latent": "EmptySD3LatentImage"
+    },
+    "turnaround_negative": "text, watermark, logo, signature, extra limbs, deformed hands, duplicate character, different face, different outfit, style change, blurry, low quality",
+    "variants_per_view": 1,
+    "lock_after_build": true
+  },
+
+  "lora": {
+    "enabled": true,
+    "backend": "ai-toolkit",
+    "image_base_model": "Qwen/Qwen-Image-Edit-2509",
+    "video_base_model": "Lightricks/LTX-2.5",
+    "train_video_lora": true,
+    "rank": 32,
+    "alpha": 32,
+    "learning_rate": 0.0001,
+    "steps": 1600,
+    "batch_size": 1,
+    "resolution": 1024,
+    "save_every": 400,
+    "output_dir": "C:/Users/samsa/python-projects/custom-wan/ComfyUI/models/loras/cast",
+    "strength_model": 0.9,
+    "strength_clip": 0.9,
+    "ltx_lora_strength": 0.75
+  },
+
+  "movie": {
+    "template_workflow": "./video_ltx2_5_i2v_especial_edition_sam.json",
+    "director_mode": "python",
+    "anchor_mode": "hybrid",
+    "reanchor_every": 2,
+    "drift_audit": true,
+    "drift_threshold": 0.72,
+    "keep_first_image": true,
+    "first_image": "Qwen-Image_00037_.png",
+    "save_each_scene": true
+  }
+}
