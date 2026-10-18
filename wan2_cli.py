@@ -782,6 +782,10 @@ def main() -> None:
     ensure_comfyui_requirements(launch_python, comfyui_dir)
     if using_directml:
         ensure_directml_kitchen_compat(launch_python)
+    pixi_fallback = Path(__file__).resolve().parent / "patches" / "comfy_env_pixi_fallback.py"
+    run_checked(
+        [str(launch_python), str(pixi_fallback), "--python", str(launch_python)]
+    )
 
     # NOT auto-enabled: a synthetic alloc-heavy benchmark on an RTX 5090 showed
     # no measurable difference (11.7ms vs 10.9ms/step) between cudaMallocAsync
