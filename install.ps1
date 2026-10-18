@@ -24,7 +24,10 @@ param(
   [switch] $ReuseVenv,
 
   [ValidateSet('Stop','Fail')]
-  [string] $LockedVenvAction = 'Fail'
+  # Rebuilding the venv routinely encounters VS Code's Python language
+  # server. Stop only processes scoped to this venv by default; callers can
+  # opt into a safe abort with -LockedVenvAction Fail.
+  [string] $LockedVenvAction = 'Stop'
 )
 
 Set-StrictMode -Version Latest
