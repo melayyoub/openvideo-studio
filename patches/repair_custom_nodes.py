@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -101,8 +100,19 @@ def repair_optional_nodes(comfyui: Path) -> None:
             return""",
     )
 
-    # A broken kiui wheel in some ComfyUI venvs ships an empty typing.py.
+    # Some kiui wheels ship an empty typing.py even though their consumers rely
+    # on star-imported typing and tensor names across multiple node packs.
     site_packages = comfyui / ".venv" / "Lib" / "site-packages"
+    kiui_typing = site_packages / "kiui" / "typing.py"
+    if kiui_typing.is_file():
+        source = kiui_typing.read_text(encoding="utf-8")
+        if "from typing import *" not in source:
+            with kiui_typing.open("a", encoding="utf-8", newline="") as stream:
+                stream.write(
+                    "\nfrom typing import *\nfrom numpy import ndarray\nfrom torch import Tensor\n"
+                )
+            print(f"[node-repair] Restored shared typing exports in {kiui_typing}")
+
     kiui_op = site_packages / "kiui" / "op.py"
     replace_once(
         kiui_op,
