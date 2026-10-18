@@ -786,6 +786,15 @@ def main() -> None:
     run_checked(
         [str(launch_python), str(pixi_fallback), "--python", str(launch_python)]
     )
+    pixal3d_patch = Path(__file__).resolve().parent / "patches" / "pixal3d_meta_loading.py"
+    run_checked(
+        [
+            sys.executable,
+            str(pixal3d_patch),
+            "--comfyui",
+            str(comfyui_dir),
+        ]
+    )
 
     # NOT auto-enabled: a synthetic alloc-heavy benchmark on an RTX 5090 showed
     # no measurable difference (11.7ms vs 10.9ms/step) between cudaMallocAsync
