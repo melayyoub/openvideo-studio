@@ -10,6 +10,57 @@ from pathlib import Path
 OLD = """    model = __getattr__(config['name'])(**config['args'], **kwargs)
     model.load_state_dict(load_file(model_file), strict=False)"""
 NEW = """    import torch
+    from safetensors import safe_open
+    model_class = __getattr__(config['name'])
+    try:
+        with torch.device('meta'):
+            model = model_class(**config['args'], **kwargs)
+        state_dict = model.state_dict()
+        with safe_open(model_file, framework='pt', device='cpu') as checkpoint:
+            if set(state_dict) != set(checkpoint.keys()):
+                raise ValueError('Pixal3D checkpoint keys do not match the model')
+            for key in checkpoint.keys():
+                tensor = checkpoint.get_tensor(key)
+                if tensor.dtype != state_dict[key].dtype:
+                    tensor = tensor.to(dtype=state_dict[key].dtype)
+                state_dict[key] = tensor
+        model.load_state_dict(state_dict, strict=False, assign=True)
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) == 1455:
+            raise OSError(
+                1455,
+                f'Windows ran out of commit memory loading Pixal3D checkpoint {model_file}. '
+                'Close memory-heavy applications or increase the Windows paging file, '
+                'then restart ComfyUI.',
+            ) from exc
+        model = model_class(**config['args'], **kwargs)
+        model.load_state_dict(load_file(model_file), strict=False)
+    except Exception:
+        model = model_class(**config['args'], **kwargs)
+        model.load_state_dict(load_file(model_file), strict=False)"""
+PREVIOUS_NEW = """    import torch
+    model_class = __getattr__(config['name'])
+    try:
+        state_dict = load_file(model_file)
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) == 1455:
+            raise OSError(
+                1455,
+                f'Windows ran out of commit memory loading Pixal3D checkpoint {model_file}. '
+                'Close memory-heavy applications or increase the Windows paging file, '
+                'then restart ComfyUI.',
+            ) from exc
+        raise
+    try:
+        with torch.device('meta'):
+            model = model_class(**config['args'], **kwargs)
+        if set(model.state_dict()) != set(state_dict):
+            raise ValueError('Pixal3D checkpoint keys do not match the model')
+        model.load_state_dict(state_dict, strict=False, assign=True)
+    except Exception:
+        model = model_class(**config['args'], **kwargs)
+        model.load_state_dict(state_dict, strict=False)"""
+PREVIOUS_META = """    import torch
     model_class = __getattr__(config['name'])
     state_dict = load_file(model_file)
     try:
@@ -21,36 +72,59 @@ NEW = """    import torch
     except Exception:
         model = model_class(**config['args'], **kwargs)
         model.load_state_dict(state_dict, strict=False)"""
+OLD_FALLBACK = """            except Exception as e:
+                _models[k] = models.from_pretrained(v)"""
+NEW_FALLBACK = """            except Exception as e:
+                if isinstance(e, OSError) and getattr(e, 'winerror', None) == 1455:
+                    raise
+                _models[k] = models.from_pretrained(v)"""
 
 
-def patch_pixal3d(comfyui: Path) -> Path | None:
-    path = (
-        comfyui
-        / "custom_nodes"
-        / "comfyui-pixal3d"
-        / "_pixal3d_src"
-        / "pixal3d"
-        / "models"
-        / "__init__.py"
-    )
-    if not path.is_file():
-        return None
-
+def replace_once(path: Path, old: str, new: str) -> bool:
     source = path.read_text(encoding="utf-8")
-    if NEW in source:
-        return None
-    if source.count(OLD) != 1:
+    if new in source:
+        return False
+    if source.count(old) != 1:
         raise RuntimeError(f"Could not safely patch Pixal3D model loading in {path}")
-    path.write_bytes(source.replace(OLD, NEW, 1).encode("utf-8"))
-    return path
+    path.write_bytes(source.replace(old, new, 1).encode("utf-8"))
+    return True
+
+
+def patch_pixal3d(comfyui: Path) -> list[Path]:
+    pixal3d = (
+        comfyui / "custom_nodes" / "comfyui-pixal3d" / "_pixal3d_src" / "pixal3d"
+    )
+    model_loader = pixal3d / "models" / "__init__.py"
+    pipeline_loader = pixal3d / "pipelines" / "base.py"
+    if not model_loader.is_file():
+        return []
+
+    patched = []
+    source = model_loader.read_text(encoding="utf-8")
+    if NEW not in source:
+        previous = next(
+            (candidate for candidate in (OLD, PREVIOUS_NEW, PREVIOUS_META)
+             if source.count(candidate) == 1),
+            None,
+        )
+        if previous is None:
+            raise RuntimeError(
+                f"Could not safely patch Pixal3D model loading in {model_loader}"
+            )
+        model_loader.write_bytes(source.replace(previous, NEW, 1).encode("utf-8"))
+        patched.append(model_loader)
+    if pipeline_loader.is_file() and replace_once(
+        pipeline_loader, OLD_FALLBACK, NEW_FALLBACK
+    ):
+        patched.append(pipeline_loader)
+    return patched
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--comfyui", type=Path, required=True)
     args = parser.parse_args()
-    path = patch_pixal3d(args.comfyui.resolve())
-    if path:
+    for path in patch_pixal3d(args.comfyui.resolve()):
         print(f"[pixal3d-meta-loading] Patched {path}")
 
 
