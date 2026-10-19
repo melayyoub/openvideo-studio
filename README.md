@@ -362,6 +362,7 @@ Both installers install the curated video node stack from
 | `ComfyUI-LTXVideo` | LTX-Video 0.9.x text-to-video and image-to-video nodes (optional for LTX-2: ComfyUI core ships the whole LTX-2 pipeline) |
 | `ComfyUI-VideoHelperSuite` | Video load, combine, and export helpers |
 | `ComfyUI-KJNodes` | Utility nodes required by Wan and LTX workflows |
+| `ComfyUI-TRELLIS2` | TRELLIS.2 image-to-3D nodes, including `LoadTrellis2Models` |
 
 Each node is cloned from its upstream GitHub repository and checked out at the
 pinned commit recorded in the manifest; its `requirements.txt` is installed

@@ -18,6 +18,12 @@
       "repository": "https://github.com/kijai/ComfyUI-KJNodes.git",
       "revision": "203eb357743402b437db8ae973a062a9b15387d2",
       "purpose": "Utility nodes commonly required by Wan and LTX example workflows"
+    },
+    {
+      "name": "ComfyUI-TRELLIS2",
+      "repository": "https://github.com/PozzettiAndrea/ComfyUI-TRELLIS2.git",
+      "revision": "3e696f2cf174dba141c9efce0205e9a2d87e908a",
+      "purpose": "TRELLIS.2 image-to-3D nodes, including LoadTrellis2Models"
     }
   ]
 }
