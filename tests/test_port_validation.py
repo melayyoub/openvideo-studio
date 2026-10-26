@@ -226,6 +226,26 @@ class BackendArgumentTests(unittest.TestCase):
                 self.assertEqual(wan2_cli.cuda_is_blackwell(selected_python), returncode == 0)
                 self.assertEqual(run.call_args.args[0][0], str(selected_python))
 
+    def test_legacy_trellis_gets_the_numba_python_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            comfyui = Path(temporary_directory) / "ComfyUI"
+            (comfyui / "custom_nodes" / "ComfyUI_TRELLIS").mkdir(parents=True)
+            with (
+                unittest.mock.patch.dict(os.environ, {}, clear=True),
+                unittest.mock.patch.object(wan2_cli.sys, "version_info", (3, 10, 11)),
+            ):
+                environment = wan2_cli.launch_environment(comfyui)
+            self.assertEqual(environment["NUMBA_DISABLE_JIT"], "1")
+
+            with (
+                unittest.mock.patch.dict(
+                    os.environ, {"NUMBA_DISABLE_JIT": "0"}, clear=True
+                ),
+                unittest.mock.patch.object(wan2_cli.sys, "version_info", (3, 10, 11)),
+            ):
+                environment = wan2_cli.launch_environment(comfyui)
+            self.assertEqual(environment["NUMBA_DISABLE_JIT"], "0")
+
     def test_windows_blackwell_defaults_reach_the_comfyui_process(self) -> None:
         # Exercise main: testing backend_arguments alone missed the disabled
         # hardware probe, so the existing safeguard never reached ComfyUI.
@@ -243,6 +263,7 @@ class BackendArgumentTests(unittest.TestCase):
                 unittest.mock.patch.object(wan2_cli, "cuda_is_blackwell", return_value=True) as probe,
                 unittest.mock.patch.object(wan2_cli, "ensure_comfyui_requirements"),
                 unittest.mock.patch.object(wan2_cli, "run_checked"),
+                unittest.mock.patch.object(wan2_cli, "stop_running_comfyui"),
                 unittest.mock.patch.object(wan2_cli, "windows_memory_status", return_value=None),
                 unittest.mock.patch.object(wan2_cli.subprocess, "call", return_value=0) as launch,
                 self.assertRaises(SystemExit) as exited,
@@ -347,6 +368,19 @@ class LauncherPortTests(unittest.TestCase):
     def assert_port_error(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("1 through 65535", result.stderr)
+
+    def test_windows_start_stops_existing_comfyui_server_trees(self) -> None:
+        with (
+            unittest.mock.patch.object(wan2_cli.os, "name", "nt"),
+            unittest.mock.patch.object(wan2_cli.subprocess, "run") as run,
+        ):
+            wan2_cli.stop_running_comfyui()
+        command = run.call_args.args[0]
+        self.assertTrue(command[0].lower().endswith("powershell.exe"))
+        self.assertEqual(command[1:3], ["-NoProfile", "-Command"])
+        self.assertIn("Get-CimInstance Win32_Process", command[3])
+        self.assertIn("taskkill.exe /PID", command[3])
+        self.assertIn("/T /F", command[3])
 
     def test_lightweight_launcher_accepts_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

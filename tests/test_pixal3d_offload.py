@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import itertools
+import pathlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import patches
@@ -24,6 +27,24 @@ except ImportError:
 
 
 class PipelineFallbackTests(unittest.TestCase):
+    def test_moge_loader_patch_is_repeatable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            node = root / "custom_nodes/comfyui-pixal3d"
+            models = node / "_pixal3d_src/pixal3d/models"
+            models.mkdir(parents=True)
+            (models / "__init__.py").write_text(meta.NEW, encoding="utf-8")
+            stages = node / "nodes/pixal3d_stages.py"
+            stages.parent.mkdir()
+            stages.write_text(
+                meta.MOGE_OLD + "\ndef _build_image_cond_model(config, backbone=None):\n" + meta.DINO_OLD,
+                encoding="utf-8",
+            )
+            self.assertIn(stages, meta.patch_pixal3d(root))
+            self.assertIn(meta.MOGE_NEW, stages.read_text(encoding="utf-8"))
+            self.assertIn(meta.DINO_NEW, stages.read_text(encoding="utf-8"))
+            self.assertEqual(meta.patch_pixal3d(root), [])
+
     def test_previous_numpy_loader_upgrades_to_streaming_and_stays_repeatable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -55,6 +76,78 @@ class PipelineFallbackTests(unittest.TestCase):
                         self.assertIn("getattr(e, 'winerror', None) == 1455", updated)
                     self.assertIn(loader, updated)
                     self.assertEqual(meta.patch_pixal3d(root), [])
+
+
+@unittest.skipIf(torch is None, "Requires the ComfyUI torch/safetensors runtime")
+class MoGeLoadingTests(unittest.TestCase):
+    def test_assigns_checkpoint_weights_and_preserves_cpu_constructor_buffers(self):
+        class TinyMoGe(torch.nn.Module):
+            def __init__(self, width):
+                super().__init__()
+                # DINOv2 reads constructor scalars before building its blocks.
+                self.schedule = torch.linspace(0, 1, 2)[1].item()
+                self.layer = torch.nn.Linear(width, width)
+                self.register_buffer("image_mean", torch.tensor([0.485]))
+
+        namespace = {"torch": torch, "pathlib": pathlib}
+        exec(
+            "def load(MOGE_MODEL_NAME, device, MoGeModel):\n"
+            + meta.MOGE_NEW + "\n    return m\n",
+            namespace,
+        )
+        reference = TinyMoGe(4)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "model.pt"
+            torch.save({"model_config": {"width": 4}, "model": reference.state_dict()}, checkpoint)
+            model = namespace["load"](str(checkpoint), "cpu", TinyMoGe)
+            inputs = torch.ones(2, 4)
+            torch.testing.assert_close(model.layer(inputs), reference.layer(inputs))
+            torch.testing.assert_close(model.image_mean, reference.image_mean)
+            self.assertEqual(model.schedule, 1.0)
+            state = reference.state_dict()
+            del state["layer.weight"]
+            torch.save({"model_config": {"width": 4}, "model": state}, checkpoint.with_name("missing.pt"))
+            with self.assertRaisesRegex(RuntimeError, "Missing key"):
+                namespace["load"](str(checkpoint.with_name("missing.pt")), "cpu", TinyMoGe)
+
+
+@unittest.skipIf(torch is None, "Requires the ComfyUI torch/safetensors runtime")
+class DinoLoadingTests(unittest.TestCase):
+    def test_streamed_legacy_checkpoint_matches_forward_and_reuses_backbone(self):
+        from transformers import DINOv3ViTConfig, DINOv3ViTModel
+        from patches import pixal3d_checkpoint_reader as reader
+
+        config = DINOv3ViTConfig(
+            hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+            num_attention_heads=4, image_size=32, patch_size=16,
+        )
+        reference = DINOv3ViTModel(config).eval()
+        namespace = {
+            "mm": SimpleNamespace(get_torch_device=lambda: "cpu"),
+            "DinoV3ProjFeatureExtractor": lambda **kwargs: SimpleNamespace(model=kwargs["backbone"]),
+        }
+        exec("def load(config, backbone=None):\n" + meta.DINO_NEW + "\n    return m\n", namespace)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config.to_json_file(root / "config.json")
+            save_file(
+                {key.removeprefix("model."): value for key, value in reference.state_dict().items()},
+                str(root / "model.safetensors"),
+            )
+            with mock.patch.dict(sys.modules, {"pixal3d.models.checkpoint_reader": reader}), mock.patch(
+                "huggingface_hub.try_to_load_from_cache", side_effect=lambda repo, filename: str(root / filename),
+            ), mock.patch("safetensors.safe_open", side_effect=AssertionError("Must not mmap")), mock.patch(
+                "huggingface_hub.hf_hub_download", side_effect=AssertionError("Already cached"),
+            ):
+                model = namespace["load"]({"model_name": "cached-dino"}).model.eval()
+                self.assertIs(namespace["load"]({}, backbone=model).model, model)
+                inputs = torch.randn(1, 3, 32, 32)
+                with torch.no_grad():
+                    torch.testing.assert_close(
+                        model(inputs).last_hidden_state, reference(inputs).last_hidden_state,
+                        rtol=0, atol=0,
+                    )
+                self.assertTrue(all(not tensor.is_meta for tensor in model.buffers()))
 
 
 @unittest.skipIf(torch is None, "Requires the ComfyUI torch/safetensors runtime")

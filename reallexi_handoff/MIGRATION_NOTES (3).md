@@ -840,7 +840,7 @@ by your own files.
 source of truth. `install.py` only pushes it into ComfyUI:
 
 ```bash
-python reallexi_handoff/install.py --comfy "C:\\Users\\samsa\\python-projects\\custom-wan\\ComfyUI"
+python reallexi_handoff/install.py --comfy ".\\ComfyUI"
 python reallexi_handoff/install.py --link        # junction instead of copy
 python reallexi_handoff/install.py --uninstall
 ```

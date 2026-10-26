@@ -27,6 +27,17 @@ def replace_once(path: Path, old: str, new: str) -> bool:
     return True
 
 
+def comfyui_python(comfyui: Path) -> Path:
+    """Select the ComfyUI environment running this repair, including named venvs."""
+    python = Path(sys.executable).resolve()
+    try:
+        python.relative_to(comfyui.resolve())
+        return python
+    except ValueError:
+        default_python = comfyui / ".venv" / "Scripts" / "python.exe"
+        return default_python if default_python.is_file() else Path(sys.executable)
+
+
 def repair_pixal3d(comfyui: Path) -> None:
     requirements = comfyui / "custom_nodes" / "comfyui-pixal3d" / "requirements.txt"
     # pyrender pins PyOpenGL 3.1.0, so the node's >=3.1.7 constraint made the
@@ -578,7 +589,8 @@ def repair_optional_nodes(comfyui: Path) -> None:
 
     # Some kiui wheels ship an empty typing.py even though their consumers rely
     # on star-imported typing and tensor names across multiple node packs.
-    site_packages = comfyui / ".venv" / "Lib" / "site-packages"
+    python = comfyui_python(comfyui)
+    site_packages = python.parent.parent / "Lib" / "site-packages"
     kiui_typing = site_packages / "kiui" / "typing.py"
     if kiui_typing.is_file():
         source = kiui_typing.read_text(encoding="utf-8")
@@ -609,8 +621,8 @@ def install_missing_optional_dependencies(comfyui: Path) -> None:
     missing = [package for module, package in modules.items() if importlib.util.find_spec(module) is None]
     if not missing:
         return
-    python = Path(sys.executable)
-    constraints = comfyui / ".venv" / "pip-constraints.txt"
+    python = comfyui_python(comfyui)
+    constraints = python.parent.parent / "pip-constraints.txt"
     command = [str(python), "-m", "pip", "install"]
     if constraints.is_file():
         command += ["-c", str(constraints)]
@@ -637,13 +649,7 @@ def repair_pixal3d_dependencies(comfyui: Path) -> None:
     # ComfyUI venv's interpreter. Prefer it so installs also work with named
     # environments such as `.venv-cuda`; only fall back to the default venv
     # when invoked from an unrelated Python.
-    python = Path(sys.executable).resolve()
-    try:
-        python.relative_to(comfyui.resolve())
-    except ValueError:
-        python = comfyui / ".venv" / "Scripts" / "python.exe"
-        if not python.is_file():
-            python = Path(sys.executable)
+    python = comfyui_python(comfyui)
     modules = [
         "moge", "utils3d", "o_voxel", "flex_gemm", "cumesh",
         "nvdiffrast", "triton", "natten", "flash_attn", "pipeline", "moderngl", "gradio",

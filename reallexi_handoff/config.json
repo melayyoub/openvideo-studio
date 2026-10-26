@@ -35,8 +35,8 @@
     "url": "http://127.0.0.1:8188",
     "timeout": 1800,
     "poll_interval": 2.0,
-    "input_dir": "C:/Users/samsa/python-projects/custom-wan/ComfyUI/input",
-    "output_dir": "C:/Users/samsa/python-projects/custom-wan/ComfyUI/output",
+    "input_dir": "./ComfyUI/input",
+    "output_dir": "./ComfyUI/output",
     "extra_args_note": "OpenVideo Studio: set CUSTOM_WAN_COMFYUI_ARGS=--disable-pinned-memory before launching for quantized LTX models"
   },
 
@@ -70,7 +70,7 @@
     "batch_size": 1,
     "resolution": 1024,
     "save_every": 400,
-    "output_dir": "C:/Users/samsa/python-projects/custom-wan/ComfyUI/models/loras/cast",
+    "output_dir": "./ComfyUI/models/loras/cast",
     "strength_model": 0.9,
     "strength_clip": 0.9,
     "ltx_lora_strength": 0.75

@@ -676,6 +676,21 @@ def backend_arguments(
     return arguments
 
 
+def launch_environment(comfyui: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    legacy_trellis = comfyui / "custom_nodes" / "ComfyUI_TRELLIS"
+    if (
+        sys.version_info < (3, 13)
+        and legacy_trellis.is_dir()
+        and "NUMBA_DISABLE_JIT" not in environment
+    ):
+        # This node imports pymatting during startup. Numba JIT compilation
+        # currently fails on the supported Windows Python 3.10 environment;
+        # pymatting retains a working Python fallback when JIT is disabled.
+        environment["NUMBA_DISABLE_JIT"] = "1"
+    return environment
+
+
 def resolve_checkout_path(configured: str, root: Path) -> Path:
     if not configured:
         return (root / "ComfyUI").resolve()
@@ -683,6 +698,26 @@ def resolve_checkout_path(configured: str, root: Path) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (root / path).resolve()
+
+
+def stop_running_comfyui() -> None:
+    """Stop existing ComfyUI server processes before starting this checkout."""
+    if os.name != "nt":
+        return
+    script = (
+        "$servers = Get-CimInstance Win32_Process | Where-Object { "
+        "$_.CommandLine -match '(?i)main\\.py' -and "
+        "$_.CommandLine -match '(?i)--port\\s+\\d+' }; "
+        "foreach ($server in $servers) { "
+        "if (Get-Process -Id $server.ProcessId -ErrorAction SilentlyContinue) { "
+        "& taskkill.exe /PID $server.ProcessId /T /F 2>$null | Out-Null; "
+        "if (Get-Process -Id $server.ProcessId -ErrorAction SilentlyContinue) { exit 1 } } }"
+    )
+    shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or "powershell.exe"
+    subprocess.run(
+        [shell, "-NoProfile", "-Command", script],
+        check=True,
+    )
 
 
 def main() -> None:
@@ -862,7 +897,14 @@ def main() -> None:
             low_memory,
         )
     )
-    raise SystemExit(subprocess.call(command, cwd=str(comfyui_dir)))
+    stop_running_comfyui()
+    raise SystemExit(
+        subprocess.call(
+            command,
+            cwd=str(comfyui_dir),
+            env=launch_environment(comfyui_dir),
+        )
+    )
 
 
 if __name__ == "__main__":

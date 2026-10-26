@@ -12,8 +12,8 @@
     "test": "pwsh -NoProfile -File tests/run.ps1",
     "wnew": "pwsh -NoProfile -File install.ps1 -Cuda cu128 -Models 5b -WithManager -Start",
     "wstart": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path .",
-    "wstart:cuda": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path . --device gpu",
-    "wstart:amd": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path . --device rocm",
+    "wstart:cuda": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path . --device gpu --port 8188",
+    "wstart:amd": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path . --device rocm --port 8188",
     "wstart:directml": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path . --device directml",
     "wstart:cpu": ".\\ComfyUI\\.venv\\Scripts\\python.exe wan2_cli.py start --path . --device cpu",
     "lstart": "./ComfyUI/.venv/bin/python wan2_cli.py start --path ."

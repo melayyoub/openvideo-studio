@@ -146,6 +146,73 @@ CURRENT_FALLBACK = """            except Exception:
                     raise
                 _models[k] = models.from_pretrained(v)"""
 
+MOGE_OLD = "    m = MoGeModel.from_pretrained(MOGE_MODEL_NAME).to(device)"
+MOGE_NEW = """    from accelerate import init_empty_weights
+    from huggingface_hub import hf_hub_download
+
+    checkpoint_path = pathlib.Path(MOGE_MODEL_NAME)
+    if not checkpoint_path.is_file():
+        checkpoint_path = hf_hub_download(MOGE_MODEL_NAME, filename="model.pt")
+    # Map checkpoint storage and assign it directly instead of allocating a
+    # second ViT-L worth of CPU weights while Windows is low on commit memory.
+    checkpoint = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=True, mmap=True,
+    )
+    # Keep buffers and constructor scalars on CPU: DINOv2 calls .item() on
+    # its drop-path schedule, which cannot be evaluated on the meta device.
+    with init_empty_weights(include_buffers=False):
+        m = MoGeModel(**checkpoint["model_config"])
+    m.load_state_dict(checkpoint["model"], strict=True, assign=True)
+    del checkpoint
+    m = m.to(device)"""
+
+DINO_OLD = """    # Transformers 5.x's async safetensors copy can access-violate on Windows.
+    # Force its supported synchronous path while loading each DINOv3 model.
+    import transformers.core_model_loading as _core_model_loading
+    _original_env_check = _core_model_loading.is_env_variable_true
+    _core_model_loading.is_env_variable_true = lambda name: (
+        name == "HF_DEACTIVATE_ASYNC_LOAD" or _original_env_check(name)
+    )
+    try:
+        m = DinoV3ProjFeatureExtractor(**config, backbone=backbone)
+    finally:
+        _core_model_loading.is_env_variable_true = _original_env_check"""
+DINO_NEW = """    if backbone is None:
+        from accelerate import init_empty_weights
+        from huggingface_hub import hf_hub_download, try_to_load_from_cache
+        from transformers import DINOv3ViTConfig, DINOv3ViTModel
+        from pixal3d.models.checkpoint_reader import load_checkpoint
+
+        paths = {}
+        for filename in ("config.json", "model.safetensors"):
+            path = try_to_load_from_cache(config["model_name"], filename)
+            if not isinstance(path, str):
+                path = hf_hub_download(config["model_name"], filename=filename)
+            paths[filename] = path
+        model_config = DINOv3ViTConfig.from_json_file(paths["config.json"])
+        # Keep computed RoPE buffers real while leaving checkpoint parameters empty.
+        with init_empty_weights(include_buffers=False):
+            backbone = DINOv3ViTModel(model_config)
+        expected = backbone.state_dict()
+        # Transformers 5 moved checkpoint layer.* keys under model.layer.*.
+        checkpoint_keys = {
+            (key.removeprefix("model.") if key.startswith("model.layer.") else key): key
+            for key in expected
+        }
+        # Stream directly to the selected device, avoiding whole-file mappings
+        # and a complete CPU copy of the weights under Windows commit pressure.
+        state = load_checkpoint(
+            paths["model.safetensors"],
+            {key: expected[target] for key, target in checkpoint_keys.items()},
+            device=mm.get_torch_device(),
+        )
+        backbone.load_state_dict(
+            {checkpoint_keys[key]: value for key, value in state.items()},
+            strict=True, assign=True,
+        )
+        backbone.to(mm.get_torch_device())
+    m = DinoV3ProjFeatureExtractor(**config, backbone=backbone)"""
+
 
 def replace_once(path: Path, old: str, new: str) -> bool:
     source = path.read_text(encoding="utf-8")
@@ -167,6 +234,12 @@ def patch_pixal3d(comfyui: Path) -> list[Path]:
         return []
 
     patched = []
+    stages = comfyui / "custom_nodes" / "comfyui-pixal3d" / "nodes" / "pixal3d_stages.py"
+    if stages.is_file() and replace_once(stages, MOGE_OLD, MOGE_NEW):
+        patched.append(stages)
+    if stages.is_file() and "def _build_image_cond_model(" in stages.read_text(encoding="utf-8"):
+        if replace_once(stages, DINO_OLD, DINO_NEW) and stages not in patched:
+            patched.append(stages)
     reader_source = Path(__file__).with_name("pixal3d_checkpoint_reader.py").read_text(encoding="utf-8")
     reader_path = model_loader.with_name("checkpoint_reader.py")
     if not reader_path.is_file() or reader_path.read_text(encoding="utf-8") != reader_source:

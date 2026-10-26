@@ -12,6 +12,14 @@ $testPython = Resolve-TestPython
 $testPythonExecutable = $testPython[0]
 $testPythonArguments = @($testPython | Select-Object -Skip 1)
 
+$distributionScriptFiles = @()
+$distributionScriptRoot = Join-Path $repositoryRoot 'ComfyUI-Windows'
+if (Test-Path -LiteralPath $distributionScriptRoot -PathType Container) {
+  $distributionScriptFiles = @(
+    Get-ChildItem -LiteralPath $distributionScriptRoot -File -Filter '*.ps1'
+  )
+}
+
 function Assert-NativeSuccess {
   param([Parameter(Mandatory = $true)] [string] $Description)
 
@@ -23,7 +31,7 @@ function Assert-NativeSuccess {
 $powerShellFiles = @(
   Get-ChildItem -LiteralPath $repositoryRoot -File -Filter '*.ps1' |
     Where-Object Name -NotIn @('install-broken.ps1', 'install.old.ps1')
-  Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'ComfyUI-Windows') -File -Filter '*.ps1'
+  $distributionScriptFiles
   Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'scripts') -File -Filter '*.ps1'
   Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'scripts') -File -Filter '*.psm1'
   Get-ChildItem -LiteralPath $PSScriptRoot -File -Filter '*.ps1'
@@ -195,7 +203,7 @@ Write-Output 'PASS: tracked text paths and contents contain no personal or machi
 if (-not (Get-Command ruff -ErrorAction SilentlyContinue)) {
   throw 'ruff is required for source validation.'
 }
-& ruff check --exclude ComfyUI --exclude hf_cache .
+& ruff check --exclude ComfyUI --exclude hf_cache --exclude Pixal3D-upstream-test .
 Assert-NativeSuccess 'Ruff'
 
 if ($IsWindows) {
