@@ -708,6 +708,12 @@ def main() -> None:
             [sys.executable, str(pixal3d_loader_patch), "--comfyui", str(comfyui)],
             check=True,
         )
+    pixal3d_custom_patch = Path(__file__).with_name("pixal3d_custom.py")
+    if pixal3d_custom_patch.is_file():
+        subprocess.run(
+            [sys.executable, str(pixal3d_custom_patch), "--comfyui", str(comfyui)],
+            check=True,
+        )
     repair_optional_nodes(comfyui)
     if args.install_dependencies:
         install_missing_optional_dependencies(comfyui)

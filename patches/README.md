@@ -21,6 +21,12 @@ multiplications to avoid a native abort in Triton's masked split-K compiler.
 The im2col temporary is limited to 64 MiB per chunk. Disk reloads and this
 convolution path can increase generation time.
 
+`pixal3d_custom.py` keeps the local Pixal3D edits outside the vendor checkout.
+The launcher applies it after restoring the memory and Windows fixes. It adds
+GLB export memory cleanup, maps unsupported RMBG aliases to BiRefNet, and
+keeps DINO feature sampling compatible with mixed precision and wrapped model
+layouts.
+
 ## controlnet_instantx_format2.py — drop-in replacement
 
 ```powershell
