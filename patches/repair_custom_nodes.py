@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -562,6 +563,51 @@ if "ATTN_BACKEND" not in os.environ:
     replace_once(stages, old_builder, new_builder)
 
 
+def repair_ollama(comfyui: Path) -> None:
+    node = comfyui / "custom_nodes" / "comfyui-ollama-describer" / "nodes.py"
+    if not node.is_file():
+        return
+    source = node.read_text(encoding="utf-8")
+    if "generate_request" in source:
+        return
+    tree = ast.parse(source)
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef) or cls.name != "OllamaImageDescriber":
+            continue
+        method = next(m for m in cls.body if isinstance(m, ast.FunctionDef)
+                      and m.name == "ollama_image_describe")
+        for statement in method.body:
+            if not isinstance(statement, ast.Assign):
+                continue
+            call = statement.value
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "client" and call.func.attr == "generate"):
+                continue
+            request = ast.get_source_segment(source, call).replace("client.generate(", "dict(", 1)
+            lines = source.splitlines(keepends=True)
+            lines[statement.lineno - 1:statement.end_lineno] = [f'''        generate_request = {request}
+        try:
+            full_response = client.generate(**generate_request)
+        except ResponseError as error:
+            # Ollama 0.40.13 aborts loading LLaVA on Windows AMD Vulkan.
+            if (os.name != "nt" or error.status_code != 500
+                    or "llama-server process has terminated" not in str(error)
+                    or "0xe06d7363" not in str(error).lower()
+                    or generate_request["options"].get("num_gpu") == 0):
+                raise
+            print("Ollama's GPU runner crashed; retrying this image request once on CPU.")
+            generate_request["options"]["num_gpu"] = 0
+            full_response = client.generate(**generate_request)
+''']
+            source = "".join(lines)
+            source = "from ollama import ResponseError\n" + source
+            ast.parse(source)
+            node.write_text(source, encoding="utf-8", newline="")
+            print(f"[node-repair] Patched {node}")
+            return
+
+
 def repair_optional_nodes(comfyui: Path) -> None:
     nodes = comfyui / "custom_nodes"
     stereo = nodes / "comfystereo" / "native_viewer" / "constants.py"
@@ -655,16 +701,34 @@ def repair_pixal3d_dependencies(comfyui: Path) -> None:
         "nvdiffrast", "triton", "natten", "flash_attn", "pipeline", "moderngl", "gradio",
     ]
     probe = (
-        "import importlib.util, json; "
+        "import importlib.util, json, platform, sys; "
         f"mods = {modules!r}; "
-        "print(json.dumps([m for m in mods if importlib.util.find_spec(m) is None]))"
+        "import torch; "
+        "print(json.dumps({'missing': [m for m in mods if importlib.util.find_spec(m) is None], "
+        "'python': list(sys.version_info[:2]), 'platform': sys.platform, "
+        "'machine': platform.machine(), 'torch': torch.__version__, "
+        "'cuda': torch.version.cuda, 'hip': torch.version.hip}))"
     )
     result = subprocess.run(
         [str(python), "-c", probe], check=True, capture_output=True, text=True
     )
     import json
-    missing = json.loads(result.stdout.strip().splitlines()[-1])
+    runtime = json.loads(result.stdout.strip().splitlines()[-1])
+    missing = runtime["missing"]
     if not missing:
+        return
+
+    # These URLs are built for one specific interpreter and CUDA/Torch ABI.
+    # Installing them into a ROCm or different Python environment cannot work.
+    if not (runtime["python"] == [3, 10] and runtime["platform"] == "win32"
+            and runtime["machine"].lower() in ("amd64", "x86_64")
+            and runtime["torch"].split("+")[0].split(".")[:2] == ["2", "11"]
+            and runtime["cuda"] == "12.8" and not runtime["hip"]):
+        print(
+            "[node-repair] Skipping Pixal3D dependency installation: its pinned "
+            "wheels require 64-bit Windows, Python 3.10, PyTorch 2.11 and CUDA 12.8; "
+            f"the selected environment reports {runtime}. Pixal3D may be unavailable."
+        )
         return
 
     print(
@@ -679,10 +743,12 @@ def repair_pixal3d_dependencies(comfyui: Path) -> None:
         [str(python), "-m", "pip", "install", "--no-deps", "-r", str(requirements)],
         check=True,
     )
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "pipeline", "moderngl", "gradio", "PyOpenGL==3.1.0"],
-        check=True,
-    )
+    runtime_install = [str(python), "-m", "pip", "install"]
+    constraints = python.parent.parent / "pip-constraints.txt"
+    if constraints.is_file():
+        runtime_install += ["-c", str(constraints)]
+    runtime_install += ["pipeline", "moderngl", "gradio", "PyOpenGL==3.1.0"]
+    subprocess.run(runtime_install, check=True)
 
     install_args = [str(python), str(installer)]
     if (node / "_pixal3d_src" / "pixal3d").is_dir():
@@ -701,6 +767,7 @@ def main() -> None:
     parser.add_argument("--install-dependencies", action="store_true")
     args = parser.parse_args()
     comfyui = args.comfyui.resolve()
+    repair_ollama(comfyui)
     repair_pixal3d(comfyui)
     pixal3d_loader_patch = Path(__file__).with_name("pixal3d_meta_loading.py")
     if pixal3d_loader_patch.is_file():

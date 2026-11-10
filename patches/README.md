@@ -27,6 +27,14 @@ GLB export memory cleanup, maps unsupported RMBG aliases to BiRefNet, and
 keeps DINO feature sampling compatible with mixed precision and wrapped model
 layouts.
 
+## Ollama image runner crash on Windows
+
+Startup repairs add one CPU retry when `OllamaImageDescriber` receives HTTP 500
+with `llama-server process has terminated` and native exception `0xe06d7363`.
+Observed with Ollama 0.40.13 loading `llava:7b-v1.6` on AMD Vulkan. The retry
+preserves the model, images, prompts, and generation options; CPU generation is
+slower. Other errors and a failed CPU retry propagate normally.
+
 ## controlnet_instantx_format2.py — drop-in replacement
 
 ```powershell

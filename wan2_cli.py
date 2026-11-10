@@ -7,6 +7,7 @@ import argparse
 import ctypes
 import hashlib
 import importlib
+import json
 import os
 import re
 import shlex
@@ -31,7 +32,7 @@ def cuda_available() -> bool:
     try:
         import torch
 
-        return bool(torch.cuda.is_available())
+        return bool(torch.cuda.is_available() and getattr(torch.version, "cuda", None))
     except Exception:
         return False
 
@@ -168,6 +169,30 @@ def reveal_hidden_gpus(environ: dict[str, str] | os._Environ) -> list[str]:
     for name in dropped:
         del environ[name]
     return dropped
+
+
+def rocm_device_arguments(python: Path, extra_args: list[str], environ) -> list[str]:
+    """Prefer the AMD device with the most compute units when none was selected."""
+    if any(arg.split("=", 1)[0] == "--cuda-device" for arg in extra_args):
+        return []
+    if any(name in environ for name in GPU_VISIBILITY_VARIABLES):
+        return []
+    probe = (
+        "import json, torch; "
+        "print(json.dumps([(torch.cuda.get_device_properties(i).multi_processor_count, "
+        "torch.cuda.get_device_name(i)) for i in range(torch.cuda.device_count())]))"
+    )
+    try:
+        result = subprocess.run([str(python), "-c", probe], check=True,
+                                capture_output=True, text=True)
+        devices = json.loads(result.stdout.strip().splitlines()[-1])
+        if len(devices) < 2:
+            return []
+        index = max(range(len(devices)), key=lambda i: devices[i][0])
+        print(f"[wan2_cli] Selecting ROCm device {index}: {devices[index][1]}")
+        return ["--cuda-device", str(index)]
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError, TypeError):
+        return []
 
 
 PIP_NETWORK_OPTIONS = ["--retries", "10", "--timeout", "120"]
@@ -780,15 +805,17 @@ def main() -> None:
     device_arguments: list[str] = []
     using_directml = False
     if args.device == "directml":
+        rocm_ready = False
         if not directml_ready:
             launch_python = ensure_backend_venv("directml", comfyui_dir)
         using_directml = True
         device_arguments = ["--directml", str(pick_directml_device(launch_python))]
     elif args.device == "gpu":
+        rocm_ready = False
         if not gpu_ready:
             launch_python = ensure_backend_venv("cuda", comfyui_dir)
             cuda_probe = (
-                "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)"
+                "import sys, torch; sys.exit(0 if torch.version.cuda and torch.cuda.is_available() else 1)"
             )
             if subprocess.call([str(launch_python), "-c", cuda_probe]) != 0:
                 raise SystemExit(
@@ -811,11 +838,15 @@ def main() -> None:
                     "again."
                 )
             rocm_ready = True
+    elif args.device == "auto" and rocm_ready:
+        pass
     elif args.device == "cpu":
+        rocm_ready = False
         device_arguments = ["--cpu"]
     elif gpu_ready:  # auto: CUDA needs no device arguments
         pass
     elif directml_ready:
+        rocm_ready = False
         using_directml = True
         device_arguments = ["--directml", str(pick_directml_device(launch_python))]
     else:
@@ -889,9 +920,12 @@ def main() -> None:
     elif args.host:
         command.extend(["--listen", str(args.host)])
     command.extend(device_arguments)
+    extra_args = shlex.split(env_setting("COMFYUI_ARGS").strip())
+    if rocm_ready:
+        command.extend(rocm_device_arguments(launch_python, extra_args, os.environ))
     command.extend(
         backend_arguments(
-            shlex.split(env_setting("COMFYUI_ARGS").strip()),
+            extra_args,
             rocm_ready,
             blackwell_ready,
             low_memory,

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -30,6 +31,57 @@ from wan2_cli_args import (  # noqa: E402
     model_revision,
     port_number,
 )
+
+
+class RocmDeviceTests(unittest.TestCase):
+    def test_cuda_request_from_rocm_uses_cuda_environment_and_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ComfyUI").mkdir()
+            (root / "ComfyUI" / "main.py").touch()
+            cuda_python = root / "ComfyUI" / ".venv-cuda" / "python.exe"
+            with (unittest.mock.patch.dict(os.environ, {}, clear=True),
+                  unittest.mock.patch.object(sys, "argv", ["wan2_cli.py", "start", "--path", str(root), "--device", "gpu"]),
+                  unittest.mock.patch.object(wan2_cli.importlib, "import_module", side_effect=ImportError),
+                  unittest.mock.patch.object(wan2_cli, "cuda_available", return_value=False),
+                  unittest.mock.patch.object(wan2_cli, "rocm_available", return_value=True),
+                  unittest.mock.patch.object(wan2_cli, "cuda_is_blackwell", return_value=False),
+                  unittest.mock.patch.object(wan2_cli, "ensure_backend_venv", return_value=cuda_python) as ensure,
+                  unittest.mock.patch.object(wan2_cli, "ensure_comfyui_requirements"),
+                  unittest.mock.patch.object(wan2_cli, "run_checked"),
+                  unittest.mock.patch.object(wan2_cli, "stop_running_comfyui"),
+                  unittest.mock.patch.object(wan2_cli, "windows_memory_status", return_value=None),
+                  unittest.mock.patch.object(wan2_cli.subprocess, "call", return_value=0) as call,
+                  self.assertRaises(SystemExit)):
+                wan2_cli.main()
+            ensure.assert_called_once_with("cuda", root / "ComfyUI")
+            command = call.call_args.args[0]
+            self.assertEqual(command[0], str(cuda_python))
+            self.assertNotIn("--use-pytorch-cross-attention", command)
+            self.assertNotIn("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", call.call_args.kwargs["env"])
+
+    def test_rocm_is_not_mistaken_for_cuda(self):
+        torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True),
+                                      version=types.SimpleNamespace(cuda=None, hip="7.2"))
+        with unittest.mock.patch.dict(sys.modules, {"torch": torch}):
+            self.assertFalse(wan2_cli.cuda_available())
+            self.assertTrue(wan2_cli.rocm_available())
+        torch.version.cuda, torch.version.hip = "12.8", None
+        with unittest.mock.patch.dict(sys.modules, {"torch": torch}):
+            self.assertTrue(wan2_cli.cuda_available())
+            self.assertFalse(wan2_cli.rocm_available())
+
+    def test_selects_gpu_with_most_compute_units(self):
+        result = subprocess.CompletedProcess([], 0, '[[1, "integrated"], [42, "Radeon"]]\n', '')
+        with unittest.mock.patch.object(wan2_cli.subprocess, "run", return_value=result):
+            self.assertEqual(wan2_cli.rocm_device_arguments(Path("python"), [], {}),
+                             ["--cuda-device", "1"])
+
+    def test_respects_explicit_selection(self):
+        with unittest.mock.patch.object(wan2_cli.subprocess, "run") as run:
+            self.assertEqual(wan2_cli.rocm_device_arguments(Path("python"), ["--cuda-device=0"], {}), [])
+            self.assertEqual(wan2_cli.rocm_device_arguments(Path("python"), [], {"HIP_VISIBLE_DEVICES": "0"}), [])
+            run.assert_not_called()
 
 
 class PortNumberTests(unittest.TestCase):
@@ -356,8 +408,17 @@ class LauncherPortTests(unittest.TestCase):
         *arguments: str,
         environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        if script == "wan2_cli.py":
+            # Port tests must never stop a real ComfyUI server on this machine.
+            command = [sys.executable, "-c", (
+                "import wan2_cli; from unittest.mock import patch; "
+                "patcher = patch.object(wan2_cli, 'stop_running_comfyui'); "
+                "patcher.start(); wan2_cli.main()"
+            ), *arguments]
+        else:
+            command = [sys.executable, str(REPOSITORY_ROOT / script), *arguments]
         return subprocess.run(
-            [sys.executable, str(REPOSITORY_ROOT / script), *arguments],
+            command,
             cwd=REPOSITORY_ROOT,
             env=environment,
             capture_output=True,

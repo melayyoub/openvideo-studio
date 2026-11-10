@@ -183,6 +183,14 @@ part of this with `OVS_ROCM_GFX`, `OVS_ROCM_PYTHON`, or `OVS_ROCM_INDEX`; on
 Linux the ROCm builds come from pytorch.org instead (`OVS_TORCH_ROCM`,
 default `rocm6.4`).
 
+CUDA and ROCm use separate Python environments when the current environment
+does not provide the requested backend. With multiple visible ROCm devices,
+the launcher chooses the device with the most compute units. Set
+`OVS_COMFYUI_ARGS=--cuda-device 0` (using the desired device index), or a GPU
+visibility variable, to choose explicitly. Custom node files are shared across
+environments; a disabled node remains disabled for both backends, and native
+node dependencies may support only one backend.
+
 On ROCm the launcher also sets `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`
 unless the environment already defines it. ROCm marks its fused attention
 kernels experimental on RDNA3 and gates them off by default, which drops SDPA
